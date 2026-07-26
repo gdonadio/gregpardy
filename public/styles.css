@@ -402,6 +402,16 @@ textarea { min-height: 8rem; resize: vertical; }
   font-size: clamp(2rem, 4vw, 4rem);
 }
 
+.setup-notice {
+  width: 100%;
+  border: 1px solid rgba(245, 194, 66, 0.7);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--gold);
+  background: rgba(245, 194, 66, 0.1);
+  font-weight: 850;
+}
+
 .qr-code {
   width: min(320px, 65vw);
   border-radius: 12px;

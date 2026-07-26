@@ -172,6 +172,7 @@ function leaderboardHtml() {
 function lobbyHtml() {
   return `<div class="lobby-grid">
     <div class="panel lobby-join">
+      ${state.databaseReady === false ? '<div class="setup-notice">Setup mode: the clue database still needs to be uploaded.</div>' : ''}
       <div class="badge">ROOM ${escapeHtml(state.session.room_code)}</div>
       <h2>Scan to Join</h2>
       <img class="qr-code" src="${escapeHtml(state.qrUrl)}" alt="QR code to join room ${escapeHtml(state.session.room_code)}">

@@ -357,8 +357,44 @@ function lowestScorePlayer(sessionId) {
   return db.prepare('SELECT * FROM player WHERE session_id = ? ORDER BY score ASC, joined_at ASC, player_id ASC LIMIT 1').get(sessionId);
 }
 
+function clueDatabaseReady() {
+  return Boolean(db.prepare(`
+    SELECT 1
+    FROM sqlite_schema
+    WHERE type = 'table' AND name = 'clue'
+  `).get());
+}
+
+function bootstrapState(session) {
+  return {
+    session,
+    databaseReady: false,
+    joinUrl: `${PUBLIC_URL}/?room=${session.room_code}`,
+    qrUrl: `/api/qr?room=${session.room_code}`,
+    players: getPlayers(session.session_id),
+    leaderboard: getLeaderboard(),
+    categories: [],
+    clues: [],
+    activeClue: null,
+    activePlayer: null,
+    buzz: null,
+    finalAnswerEndsAt: null,
+    finalRevealStep: 0,
+    finalRevealRows: [],
+    answerTimerEndsAt: null,
+    answerTimedOut: false,
+    dailyDoubleWager: null,
+    lockedOut: [],
+    final: { category: null, clue: null, responses: [] },
+    pity: { candidates: [], voters: [] },
+    lastError: 'The clue database has not been installed yet.',
+    allowRepeatOffer: false
+  };
+}
+
 function publicState(role = 'player', profileId = null) {
   const session = currentSession();
+  if (!clueDatabaseReady()) return bootstrapState(session);
   const round = session.current_round || 'J';
   const activeClue = db.prepare(`
     SELECT gsc.*, c.clue_text, c.correct_response
@@ -398,6 +434,7 @@ function publicState(role = 'player', profileId = null) {
   });
   return {
     session,
+    databaseReady: true,
     joinUrl: `${PUBLIC_URL}/?room=${session.room_code}`,
     qrUrl: `/api/qr?room=${session.room_code}`,
     players: getPlayers(session.session_id),
