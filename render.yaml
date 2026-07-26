@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: gregpardy
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_PATH
+        value: /var/data/jeopardy.db
+      - key: GAME_PASSWORD
+        sync: false
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: PUBLIC_URL
+        sync: false
+    disk:
+      name: gregpardy-data
+      mountPath: /var/data
+      sizeGB: 1
