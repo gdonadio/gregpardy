@@ -239,7 +239,7 @@ function activeClueScreenHtml(active) {
     </div></div>`;
   }
   return `<div class="clue-stage"><div>
-    <div class="badge">${active.is_daily_double ? 'DAILY DOUBLE' : state.session.status === 'final_clue' ? 'FINAL GREGPARDY' : 'CLUE'}</div>
+    <div class="badge">${active.is_daily_double ? 'DAILY DOUBLE' : state.session.status === 'final_clue' ? 'FINAL GREGPARDY' : escapeHtml(activeCategoryName())}</div>
     <div class="clue-text">${escapeHtml(active.clue_text)}</div>
     ${state.buzz?.selectedPlayerId ? `<div class="selected-buzzer">${escapeHtml(playerName(state.buzz.selectedPlayerId))}${timesUpHtml()}</div>` : ''}
     ${state.answerTimerEndsAt ? '<div id="answerTimer" class="timer"></div>' : ''}

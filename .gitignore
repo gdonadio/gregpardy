@@ -10,3 +10,4 @@ npm-debug.log*
 *.db-wal
 *.db-shm
 *.db-journal
+GREGPARDY_BUILD_PLAN.md
