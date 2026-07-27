@@ -10,7 +10,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: DB_PATH
-        value: /var/data/bootstrap.db
+        value: /var/data/jeopardy.upload.db
       - key: GAME_PASSWORD
         sync: false
       - key: AUTH_SECRET
