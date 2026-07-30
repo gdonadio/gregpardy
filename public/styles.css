@@ -412,6 +412,32 @@ textarea { min-height: 8rem; resize: vertical; }
   font-weight: 850;
 }
 
+.host-notice {
+  width: 100%;
+  margin-bottom: 16px;
+  border: 3px solid var(--gold);
+  border-radius: 8px;
+  padding: 16px;
+  color: #101114;
+  background: var(--gold);
+  text-align: center;
+  font-size: clamp(1.2rem, 3vw, 2.4rem);
+  font-weight: 950;
+}
+
+.judge-claim {
+  width: min(560px, calc(100% - 28px));
+  min-height: 50vh;
+  margin: 10vh auto;
+  place-content: center;
+  text-align: center;
+}
+
+.judge-claim button {
+  min-height: 72px;
+  font-size: 1.2rem;
+}
+
 .qr-code {
   width: min(320px, 65vw);
   border-radius: 12px;

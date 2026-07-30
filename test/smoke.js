@@ -4,8 +4,8 @@ const { io } = require('socket.io-client');
 const baseUrl = process.env.TEST_URL || 'http://localhost:3127';
 const password = process.env.TEST_PASSWORD || 'test-password';
 
-function connect(role) {
-  return io(baseUrl, { transports: ['websocket'], auth: { role } });
+function connect(role, judgeToken = '') {
+  return io(baseUrl, { transports: ['websocket'], auth: { role, judgeToken } });
 }
 
 function once(socket, event) {
@@ -38,17 +38,27 @@ async function join(socket, roomCode, displayName, profileToken = '') {
   return once(socket, 'player:joined');
 }
 
+async function claimJudge(socket, { judgeToken = '', takeover = false } = {}) {
+  const claimedPromise = once(socket, 'judge:claimed');
+  const statePromise = stateMatching(socket, (state) => state.isJudge);
+  socket.emit('judge:claim', { judgeToken, takeover });
+  const [claimed, state] = await Promise.all([claimedPromise, statePromise]);
+  return { ...claimed, state };
+}
+
 async function main() {
   const judge = connect('judge');
   const playerOne = connect('player');
   const playerTwo = connect('player');
   const sockets = [judge, playerOne, playerTwo];
   try {
-    const [judgeLobby] = await Promise.all([
+    await Promise.all([
       authenticate(judge),
       authenticate(playerOne),
       authenticate(playerTwo)
     ]);
+    const initialJudge = await claimJudge(judge);
+    const judgeLobby = initialJudge.state;
     const joinedOne = await join(playerOne, judgeLobby.session.room_code, 'Smoke One');
     const joinedTwo = await join(playerTwo, judgeLobby.session.room_code, 'Smoke Two');
     assert.ok(joinedOne.profileToken);
@@ -85,6 +95,34 @@ async function main() {
     judge.emit('game:create', { roomCode: '8642' });
     const chosenRoom = await chosenRoomPromise;
     assert.equal(chosenRoom.session.room_code, '8642');
+
+    const secondJudge = connect('judge');
+    sockets.push(secondJudge);
+    const secondJudgeState = await authenticate(secondJudge);
+    assert.equal(secondJudgeState.isJudge, false);
+    assert.equal(secondJudgeState.judgeStatus.occupied, true);
+
+    const revokedPromise = once(judge, 'judge:revoked');
+    const changedNoticePromise = stateMatching(
+      playerOne,
+      (state) => state.hostNotice?.message === 'THE JUDGE/HOST HAS CHANGED!'
+    );
+    const secondClaim = await claimJudge(secondJudge, { takeover: true });
+    assert.match(await revokedPromise, /taken over/i);
+    const changedState = await changedNoticePromise;
+    assert.ok(changedState.hostNotice.endsAt > Date.now());
+
+    const deniedPromise = once(judge, 'error:message');
+    judge.emit('game:create', { roomCode: '7777' });
+    assert.match(await deniedPromise, /active host/i);
+
+    secondJudge.close();
+    const reconnectingJudge = connect('judge', secondClaim.judgeToken);
+    sockets.push(reconnectingJudge);
+    const reclaimedPromise = once(reconnectingJudge, 'judge:claimed');
+    const reclaimedState = await authenticate(reconnectingJudge);
+    assert.equal(reclaimedState.isJudge, true);
+    assert.equal((await reclaimedPromise).judgeToken, secondClaim.judgeToken);
     console.log('Smoke test passed');
   } finally {
     sockets.forEach((socket) => socket.close());

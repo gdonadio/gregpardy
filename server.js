@@ -16,6 +16,8 @@ const AUTH_SECRET = process.env.AUTH_SECRET || GAME_PASSWORD;
 const AUTH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 10;
+const JUDGE_RECONNECT_GRACE_MS = 10000;
+const HOST_NOTICE_MS = 60000;
 
 const app = express();
 const server = http.createServer(app);
@@ -70,6 +72,49 @@ let runtime = {
   answerTimedOut: false,
   dailyDoubleWagers: new Map()
 };
+
+let judgeLease = {
+  tokenHash: null,
+  socketId: null,
+  releaseTimer: null,
+  notice: null
+};
+
+const JUDGE_EVENTS = new Set([
+  'game:create',
+  'game:new',
+  'game:start',
+  'clue:select',
+  'round:introNext',
+  'round:continueFromSummary',
+  'clue:showDailyDouble',
+  'buzz:open',
+  'buzz:close',
+  'buzz:overrideWinner',
+  'answer:startTimer',
+  'answer:correct',
+  'answer:incorrect',
+  'clue:close',
+  'score:adjust',
+  'round:advance',
+  'final:revealClue',
+  'final:startTimer',
+  'final:judgeResponse',
+  'final:nextReveal',
+  'game:end'
+]);
+
+function currentHostNotice() {
+  if (!judgeLease.notice || judgeLease.notice.endsAt <= Date.now()) {
+    judgeLease.notice = null;
+    return null;
+  }
+  return judgeLease.notice;
+}
+
+function setHostNotice(message) {
+  judgeLease.notice = { message, endsAt: Date.now() + HOST_NOTICE_MS };
+}
 
 function resetRuntime() {
   if (runtime.finalTimer) clearTimeout(runtime.finalTimer);
@@ -376,10 +421,13 @@ function clueDatabaseReady() {
   `).get());
 }
 
-function bootstrapState(session) {
+function bootstrapState(session, role) {
   return {
     session,
     databaseReady: false,
+    isJudge: role === 'judge',
+    judgeStatus: { occupied: Boolean(judgeLease.tokenHash) },
+    hostNotice: currentHostNotice(),
     joinUrl: `${PUBLIC_URL}/?room=${session.room_code}`,
     qrUrl: `/api/qr?room=${session.room_code}`,
     players: getPlayers(session.session_id),
@@ -406,7 +454,7 @@ function bootstrapState(session) {
 
 function publicState(role = 'player', profileId = null) {
   const session = currentSession();
-  if (!clueDatabaseReady()) return bootstrapState(session);
+  if (!clueDatabaseReady()) return bootstrapState(session, role);
   const round = session.current_round || 'J';
   const activeClue = db.prepare(`
     SELECT gsc.*, c.clue_text, c.correct_response
@@ -447,6 +495,9 @@ function publicState(role = 'player', profileId = null) {
   return {
     session,
     databaseReady: true,
+    isJudge: judge,
+    judgeStatus: { occupied: Boolean(judgeLease.tokenHash) },
+    hostNotice: currentHostNotice(),
     joinUrl: `${PUBLIC_URL}/?room=${session.room_code}`,
     qrUrl: `/api/qr?room=${session.room_code}`,
     players: getPlayers(session.session_id),
@@ -693,16 +744,61 @@ app.get('/screen', (_req, res) => res.sendFile(path.join(__dirname, 'public', 's
 app.get('/player', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'player.html')));
 app.get('/judge', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'judge.html')));
 
+function assignJudge(socket, judgeToken, { takeover = false } = {}) {
+  const presentedHash = tokenHash(judgeToken);
+  const existingSocket = judgeLease.socketId ? io.sockets.sockets.get(judgeLease.socketId) : null;
+  const reclaiming = Boolean(judgeToken && judgeLease.tokenHash && safeEqual(presentedHash, judgeLease.tokenHash));
+
+  if (judgeLease.tokenHash && !reclaiming && !takeover) {
+    socket.emit('judge:claimDenied');
+    return false;
+  }
+
+  if (existingSocket && existingSocket.id !== socket.id) {
+    existingSocket.data.role = 'spectator';
+    existingSocket.emit('judge:revoked', 'Another device has taken over as host/judge.');
+  }
+
+  if (judgeLease.releaseTimer) clearTimeout(judgeLease.releaseTimer);
+  const issuedToken = reclaiming ? judgeToken : crypto.randomBytes(32).toString('base64url');
+  judgeLease.tokenHash = tokenHash(issuedToken);
+  judgeLease.socketId = socket.id;
+  judgeLease.releaseTimer = null;
+  socket.data.role = 'judge';
+  socket.emit('judge:claimed', { judgeToken: issuedToken });
+
+  if (takeover && !reclaiming) {
+    setHostNotice('THE JUDGE/HOST HAS CHANGED!');
+  }
+  emitState();
+  return true;
+}
+
+function restoreJudge(socket) {
+  if (socket.data.requestedRole !== 'judge') return false;
+  const judgeToken = String(socket.handshake.auth?.judgeToken || '');
+  if (!judgeToken || !judgeLease.tokenHash || !safeEqual(tokenHash(judgeToken), judgeLease.tokenHash)) return false;
+  return assignJudge(socket, judgeToken);
+}
+
 io.on('connection', (socket) => {
   const requestedRole = String(socket.handshake.auth?.role || 'player');
-  socket.data.role = ['screen', 'judge', 'player'].includes(requestedRole) ? requestedRole : 'player';
+  socket.data.requestedRole = ['screen', 'judge', 'player'].includes(requestedRole) ? requestedRole : 'player';
+  socket.data.role = socket.data.requestedRole === 'judge' ? 'spectator' : socket.data.requestedRole;
   socket.data.authenticated = validAccessToken(socket.handshake.auth?.accessToken);
   socket.data.profileId = null;
 
   socket.use(([event], next) => {
-    if (event === 'auth:login' || socket.data.authenticated) return next();
-    socket.emit('auth:required');
-    return next(new Error('Authentication required'));
+    if (event === 'auth:login') return next();
+    if (!socket.data.authenticated) {
+      socket.emit('auth:required');
+      return next(new Error('Authentication required'));
+    }
+    if (JUDGE_EVENTS.has(event) && socket.data.role !== 'judge') {
+      socket.emit('error:message', 'Only the active host/judge can do that.');
+      return next(new Error('Judge authorization required'));
+    }
+    return next();
   });
 
   socket.on('auth:login', ({ password } = {}) => {
@@ -721,14 +817,21 @@ io.on('connection', (socket) => {
     socket.data.authenticated = true;
     const accessToken = signAccessToken();
     socket.emit('auth:authenticated', { accessToken });
+    restoreJudge(socket);
     socket.emit('state:update', publicState(socket.data.role, socket.data.profileId));
   });
 
   if (socket.data.authenticated) {
+    restoreJudge(socket);
     socket.emit('state:update', publicState(socket.data.role, socket.data.profileId));
   } else {
     socket.emit('auth:required');
   }
+
+  socket.on('judge:claim', ({ judgeToken, takeover = false } = {}) => {
+    if (socket.data.requestedRole !== 'judge') return;
+    assignJudge(socket, String(judgeToken || ''), { takeover: Boolean(takeover) });
+  });
 
   socket.on('game:create', ({ roomCode: requestedCode } = {}) => {
     const cleanCode = String(requestedCode || '').trim();
@@ -801,6 +904,18 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const player = socketPlayer(socket);
     if (player) db.prepare('UPDATE player SET is_connected = 0 WHERE player_id = ?').run(player.player_id);
+    if (judgeLease.socketId === socket.id) {
+      judgeLease.socketId = null;
+      if (judgeLease.releaseTimer) clearTimeout(judgeLease.releaseTimer);
+      judgeLease.releaseTimer = setTimeout(() => {
+        if (judgeLease.socketId) return;
+        judgeLease.tokenHash = null;
+        judgeLease.releaseTimer = null;
+        setHostNotice('THE HOST/JUDGE HAS DISCONNECTED');
+        emitState();
+      }, JUDGE_RECONNECT_GRACE_MS);
+      emitState();
+    }
   });
 
   socket.on('game:start', ({ allowRepeats = false } = {}) => {

@@ -3,7 +3,8 @@ const pageRole = document.body.dataset.page === 'screen' ? 'screen'
 const socket = io({
   auth: {
     accessToken: localStorage.getItem('gregpardyAccessToken') || '',
-    role: pageRole
+    role: pageRole,
+    judgeToken: localStorage.getItem('gregpardyJudgeToken') || ''
   }
 });
 const $ = (selector) => document.querySelector(selector);
@@ -20,6 +21,8 @@ let answerTimerInterval = null;
 let finalDraftTimer = null;
 let finalAutoSubmitted = false;
 let lastBuzzSubmitAt = 0;
+let judgeRevoked = false;
+let hostNoticeTimer = null;
 
 function joinedRoomCodes() {
   let rooms;
@@ -51,6 +54,12 @@ socket.on('state:update', (nextState) => {
     emit('player:rejoin', { profileToken });
   }
   render();
+  if (hostNoticeTimer) clearTimeout(hostNoticeTimer);
+  if (state.hostNotice?.endsAt > Date.now()) {
+    hostNoticeTimer = setTimeout(() => {
+      document.querySelectorAll('.host-notice').forEach((notice) => notice.remove());
+    }, state.hostNotice.endsAt - Date.now());
+  }
 });
 
 socket.on('auth:required', () => {
@@ -91,6 +100,25 @@ socket.on('player:rejoinFailed', () => {
   myPlayerId = 0;
   localStorage.removeItem('gregpardyProfileToken');
   localStorage.removeItem('gregpardyPlayerId');
+});
+
+socket.on('judge:claimed', ({ judgeToken }) => {
+  localStorage.setItem('gregpardyJudgeToken', judgeToken);
+  socket.auth.judgeToken = judgeToken;
+  judgeRevoked = false;
+});
+
+socket.on('judge:claimDenied', () => {
+  const error = $('#judgeClaimError');
+  if (error) error.textContent = 'Another device is currently the host/judge.';
+});
+
+socket.on('judge:revoked', (message) => {
+  localStorage.removeItem('gregpardyJudgeToken');
+  socket.auth.judgeToken = '';
+  judgeRevoked = true;
+  window.alert(message || 'Another device has taken over as host/judge.');
+  render();
 });
 
 socket.on('error:message', (message) => {
@@ -172,6 +200,11 @@ function finalSummaryHtml() {
       <div class="final-row"><strong>${place}. ${escapeHtml(player.display_name)}</strong><span>${money(player.score)}</span></div>
     `).join('')}</div>
   </div></div>`;
+}
+
+function hostNoticeHtml() {
+  if (!state?.hostNotice || state.hostNotice.endsAt <= Date.now()) return '';
+  return `<div class="host-notice">${escapeHtml(state.hostNotice.message)}</div>`;
 }
 
 function leaderboardHtml(rows, title, emptyMessage) {
@@ -329,7 +362,7 @@ function topbarHtml() {
       <span class="badge">${state.joinUrl}</span>
       <span class="badge">${state.session.status}</span>
     </div>
-  </header>`;
+  </header>${hostNoticeHtml()}`;
 }
 
 function renderJoin() {
@@ -415,7 +448,7 @@ function renderPlayer() {
   } else {
     body += `<div class="panel"><h2>Stand by</h2><p class="muted">The judge is running the next step.</p></div>`;
   }
-  root.innerHTML = `<main class="phone stack">${body}<p id="error" class="error"></p></main>`;
+  root.innerHTML = `<main class="phone stack">${hostNoticeHtml()}${body}<p id="error" class="error"></p></main>`;
   setupFinalTimer();
   setupAnswerTimer();
 }
@@ -482,6 +515,16 @@ function autoSubmitFinalResponse() {
 function renderJudge() {
   const root = $('#app');
   if (!state) return;
+  if (!state.isJudge || judgeRevoked) {
+    const occupied = state.judgeStatus?.occupied;
+    root.innerHTML = `<main class="judge-claim panel stack">
+      <h1 class="brand">GREGPARDY!</h1>
+      <h2>${occupied ? 'Another host is running the game.' : 'GREGPARDY! needs a host.'}</h2>
+      <button onclick="claimJudge(${occupied ? 'true' : 'false'})">${occupied ? 'Take Over as Host/Judge' : 'Be the Host/Judge'}</button>
+      <p id="judgeClaimError" class="error"></p>
+    </main>`;
+    return;
+  }
   if (state.session.status === 'lobby') {
     root.innerHTML = `${topbarHtml()}
       <div class="judge-layout">
@@ -515,6 +558,14 @@ function renderJudge() {
     </div>`;
   setupFinalTimer();
   setupAnswerTimer();
+}
+
+function claimJudge(takeover) {
+  if (takeover && !window.confirm('Take over as host? The current host will immediately lose control.')) return;
+  emit('judge:claim', {
+    judgeToken: localStorage.getItem('gregpardyJudgeToken') || '',
+    takeover
+  });
 }
 
 function judgeFinalTopHtml() {
