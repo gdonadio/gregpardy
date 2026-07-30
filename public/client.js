@@ -21,11 +21,31 @@ let finalDraftTimer = null;
 let finalAutoSubmitted = false;
 let lastBuzzSubmitAt = 0;
 
+function joinedRoomCodes() {
+  let rooms;
+  try {
+    rooms = JSON.parse(localStorage.getItem('gregpardyProfileRooms') || '[]');
+  } catch {
+    rooms = [];
+  }
+  const legacyRoom = localStorage.getItem('gregpardyProfileRoomCode');
+  if (legacyRoom && !rooms.includes(legacyRoom)) rooms.push(legacyRoom);
+  return rooms.filter((room) => /^\d{4}$/.test(String(room)));
+}
+
+function rememberRoom(roomCode) {
+  const cleanCode = String(roomCode || '');
+  if (!/^\d{4}$/.test(cleanCode)) return;
+  const rooms = joinedRoomCodes();
+  if (!rooms.includes(cleanCode)) rooms.push(cleanCode);
+  localStorage.setItem('gregpardyProfileRooms', JSON.stringify(rooms));
+  localStorage.setItem('gregpardyProfileRoomCode', cleanCode);
+}
+
 socket.on('state:update', (nextState) => {
   authenticated = true;
   state = nextState;
-  const profileRoomCode = localStorage.getItem('gregpardyProfileRoomCode') || '';
-  if (profileToken && profileRoomCode === state.session.room_code
+  if (profileToken && joinedRoomCodes().includes(state.session.room_code)
     && pageRole === 'player' && lastRejoinedSessionId !== state.session.session_id) {
     lastRejoinedSessionId = state.session.session_id;
     emit('player:rejoin', { profileToken });
@@ -55,7 +75,7 @@ socket.on('player:joined', ({ playerId, profileToken: nextProfileToken, displayN
   localStorage.setItem('gregpardyPlayerId', String(myPlayerId));
   localStorage.setItem('gregpardyProfileToken', profileToken);
   localStorage.setItem('gregpardyDisplayName', displayName || '');
-  if (state?.session?.room_code) localStorage.setItem('gregpardyProfileRoomCode', state.session.room_code);
+  if (state?.session?.room_code) rememberRoom(state.session.room_code);
   location.href = '/player';
 });
 
@@ -63,7 +83,7 @@ socket.on('player:rejoined', ({ playerId, displayName }) => {
   myPlayerId = Number(playerId);
   localStorage.setItem('gregpardyPlayerId', String(myPlayerId));
   localStorage.setItem('gregpardyDisplayName', displayName || '');
-  if (state?.session?.room_code) localStorage.setItem('gregpardyProfileRoomCode', state.session.room_code);
+  if (state?.session?.room_code) rememberRoom(state.session.room_code);
 });
 
 socket.on('player:rejoinFailed', () => {
@@ -154,14 +174,14 @@ function finalSummaryHtml() {
   </div></div>`;
 }
 
-function leaderboardHtml() {
-  if (!state.leaderboard?.length) {
-    return '<div class="panel leaderboard"><h2>All-Time Leaders</h2><p class="muted">Leaderboard results will appear after the first completed game.</p></div>';
+function leaderboardHtml(rows, title, emptyMessage) {
+  if (!rows?.length) {
+    return `<div class="panel leaderboard"><h2>${escapeHtml(title)}</h2><p class="muted">${escapeHtml(emptyMessage)}</p></div>`;
   }
   return `<div class="panel leaderboard">
-    <h2>All-Time Leaders</h2>
+    <h2>${escapeHtml(title)}</h2>
     <div class="leaderboard-head"><span>Player</span><span>Wins</span><span>Winnings</span></div>
-    ${state.leaderboard.map((row) => `<div class="leaderboard-row">
+    ${rows.map((row) => `<div class="leaderboard-row">
       <strong>${escapeHtml(row.display_name)}</strong>
       <span>${Number(row.wins)}</span>
       <span>${money(row.cash_winnings)}</span>
@@ -180,7 +200,12 @@ function lobbyHtml() {
       <p>${state.players.length} player${state.players.length === 1 ? '' : 's'} waiting</p>
       <div class="lobby-player-list">${state.players.map((player) => `<span class="badge">${escapeHtml(player.display_name)}</span>`).join('')}</div>
     </div>
-    ${leaderboardHtml()}
+    <div class="stack">
+      ${leaderboardHtml(state.leaderboard, 'All-Time Leaders', 'Leaderboard results will appear after the first completed game.')}
+      ${state.roomLeaderboard?.length
+        ? leaderboardHtml(state.roomLeaderboard, `Room ${state.session.room_code} Leaders`, 'This room has no completed games yet.')
+        : ''}
+    </div>
   </div>`;
 }
 
@@ -544,9 +569,18 @@ function judgeAdminOptionsHtml() {
 
 function confirmNewRoom() {
   const shouldWarn = state.players.length > 0 || state.session.status !== 'lobby' || state.clues.length > 0;
-  if (!shouldWarn || window.confirm('Would you like to start a new room? Any current game would be lost.')) {
-    emit('game:create');
+  if (shouldWarn && !window.confirm('Open another room? The current game will be recorded as complete.')) return;
+  const requestedCode = window.prompt(
+    'Enter a previous 4-digit room code to reopen its series, enter a new 4-digit code, or leave blank to generate one.',
+    ''
+  );
+  if (requestedCode === null) return;
+  const cleanCode = requestedCode.trim();
+  if (cleanCode && !/^\d{4}$/.test(cleanCode)) {
+    window.alert('Room codes must contain exactly four digits.');
+    return;
   }
+  emit('game:create', { roomCode: cleanCode });
 }
 
 function confirmNewGame() {

@@ -219,14 +219,17 @@ function currentSession() {
   return activeSession();
 }
 
-function getLeaderboard() {
+function getLeaderboard(room = null) {
   return db.prepare(`
     WITH completed_players AS (
       SELECT p.profile_id, p.display_name, p.score, p.session_id,
              DENSE_RANK() OVER (PARTITION BY p.session_id ORDER BY p.score DESC) AS place
       FROM player p
       JOIN game_session gs ON gs.session_id = p.session_id
-      WHERE gs.status = 'complete' AND p.profile_id IS NOT NULL
+      WHERE gs.status = 'complete'
+        AND gs.started_at IS NOT NULL
+        AND p.profile_id IS NOT NULL
+        AND (? IS NULL OR gs.room_code = ?)
     )
     SELECT pp.profile_id,
            pp.current_display_name AS display_name,
@@ -238,7 +241,15 @@ function getLeaderboard() {
     JOIN completed_players cp ON cp.profile_id = pp.profile_id
     GROUP BY pp.profile_id
     ORDER BY wins DESC, cash_winnings DESC, pp.current_display_name
-  `).all();
+  `).all(room, room);
+}
+
+function freshRoomCode() {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const candidate = roomCode();
+    if (!db.prepare('SELECT 1 FROM game_session WHERE room_code = ? LIMIT 1').get(candidate)) return candidate;
+  }
+  throw new Error('Could not generate a new room code. Try again.');
 }
 
 function profileFromToken(profileToken) {
@@ -373,6 +384,7 @@ function bootstrapState(session) {
     qrUrl: `/api/qr?room=${session.room_code}`,
     players: getPlayers(session.session_id),
     leaderboard: getLeaderboard(),
+    roomLeaderboard: getLeaderboard(session.room_code),
     categories: [],
     clues: [],
     activeClue: null,
@@ -439,6 +451,7 @@ function publicState(role = 'player', profileId = null) {
     qrUrl: `/api/qr?room=${session.room_code}`,
     players: getPlayers(session.session_id),
     leaderboard: getLeaderboard(),
+    roomLeaderboard: getLeaderboard(session.room_code),
     categories: getCategories(session.session_id, round),
     clues: getClues(session.session_id, round).map(redactClue),
     activeClue: redactClue(activeClue),
@@ -717,8 +730,16 @@ io.on('connection', (socket) => {
     socket.emit('auth:required');
   }
 
-  socket.on('game:create', () => {
-    const info = db.prepare("INSERT INTO game_session (room_code, status, created_at) VALUES (?, 'lobby', ?)").run(roomCode(), now());
+  socket.on('game:create', ({ roomCode: requestedCode } = {}) => {
+    const cleanCode = String(requestedCode || '').trim();
+    if (cleanCode && !/^\d{4}$/.test(cleanCode)) {
+      return socket.emit('error:message', 'Room codes must contain exactly four digits.');
+    }
+    const previous = currentSession();
+    if (previous.status !== 'complete') completeSession(previous);
+    const nextRoomCode = cleanCode || freshRoomCode();
+    const info = db.prepare("INSERT INTO game_session (room_code, status, created_at) VALUES (?, 'lobby', ?)")
+      .run(nextRoomCode, now());
     resetRuntime();
     db.prepare("UPDATE player SET is_connected = 0 WHERE session_id <> ?").run(info.lastInsertRowid);
     emitState();

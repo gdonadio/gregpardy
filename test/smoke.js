@@ -72,10 +72,19 @@ async function main() {
     const newLobby = await newLobbyPromise;
     assert.equal(newLobby.session.status, 'lobby');
     assert.equal(newLobby.session.room_code, previousRoom);
+    assert.ok(newLobby.roomLeaderboard.length >= 2);
 
     playerOne.emit('player:rejoin', { profileToken: joinedOne.profileToken });
     const rejoined = await once(playerOne, 'player:rejoined');
     assert.notEqual(rejoined.playerId, joinedOne.playerId);
+
+    const chosenRoomPromise = stateMatching(
+      judge,
+      (state) => state.session.status === 'lobby' && state.session.room_code === '8642'
+    );
+    judge.emit('game:create', { roomCode: '8642' });
+    const chosenRoom = await chosenRoomPromise;
+    assert.equal(chosenRoom.session.room_code, '8642');
     console.log('Smoke test passed');
   } finally {
     sockets.forEach((socket) => socket.close());
