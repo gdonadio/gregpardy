@@ -8,6 +8,7 @@ const QRCode = require('qrcode');
 
 const PORT = Number(process.env.PORT || 3000);
 const BUZZ_WINDOW_MS = 300;
+const BUZZ_OPEN_MS = 10000;
 const FINAL_ANSWER_MS = 30000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'jeopardy.db');
 const PUBLIC_URL = String(process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
@@ -136,6 +137,7 @@ function setHostNotice(message) {
 }
 
 function resetRuntime() {
+  clearBuzzTimers();
   if (runtime.finalTimer) clearTimeout(runtime.finalTimer);
   if (runtime.answerTimer) clearTimeout(runtime.answerTimer);
   runtime = {
@@ -557,7 +559,8 @@ function publicState(role = 'player', profileId = null) {
       open: runtime.buzz.open,
       groupId: runtime.buzz.groupId,
       selectedPlayerId: runtime.buzz.selectedPlayerId,
-      group: runtime.buzz.group
+      group: runtime.buzz.group,
+      closesAt: runtime.buzz.closesAt
     } : null,
     finalAnswerEndsAt: runtime.finalAnswerEndsAt,
     finalRevealStep: runtime.finalRevealStep,
@@ -683,15 +686,29 @@ function dailyDoubleMaxWager(activeClue, player) {
   return Math.max(roundMaximum, money(player?.score));
 }
 
+function clearBuzzTimers(buzz = runtime.buzz) {
+  if (buzz?.selectionTimer) clearTimeout(buzz.selectionTimer);
+  if (buzz?.closeTimer) clearTimeout(buzz.closeTimer);
+}
+
 function openBuzzing(activeClue) {
-  if (runtime.buzz?.timer) clearTimeout(runtime.buzz.timer);
+  clearBuzzTimers();
   runtime.buzz = {
     open: true,
     groupId: crypto.randomUUID(),
     group: [],
     selectedPlayerId: null,
-    timer: null
+    selectionTimer: null,
+    closeTimer: null,
+    closesAt: Date.now() + BUZZ_OPEN_MS
   };
+  runtime.buzz.closeTimer = setTimeout(() => {
+    if (!runtime.buzz?.open) return;
+    runtime.buzz.open = false;
+    runtime.buzz.closeTimer = null;
+    runtime.buzz.closesAt = null;
+    emitState();
+  }, BUZZ_OPEN_MS);
   runtime.answerTimedOut = false;
   db.prepare("UPDATE game_session_clue SET status = 'buzzing' WHERE session_clue_id = ?")
     .run(activeClue.session_clue_id);
@@ -712,6 +729,7 @@ function closeActiveClue() {
   const active = publicState().activeClue;
   if (!active) return;
   db.prepare("UPDATE game_session_clue SET status = 'completed', completed_at = ? WHERE session_clue_id = ?").run(now(), active.session_clue_id);
+  clearBuzzTimers();
   runtime.buzz = null;
   runtime.lockedOut = new Set();
   runtime.answerTimerEndsAt = null;
@@ -1023,6 +1041,7 @@ io.on('connection', (socket) => {
     const status = clue.is_daily_double ? 'daily_double' : 'revealed';
     db.prepare('UPDATE game_session_clue SET status = ?, selected_by_player_id = ?, revealed_at = ? WHERE session_clue_id = ?')
       .run(status, session.active_player_id, now(), clue.session_clue_id);
+    clearBuzzTimers();
     runtime.buzz = null;
     runtime.lockedOut = new Set();
     emitState();
@@ -1059,8 +1078,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('buzz:close', () => {
-    if (runtime.buzz?.timer) clearTimeout(runtime.buzz.timer);
-    if (runtime.buzz) runtime.buzz.open = false;
+    clearBuzzTimers();
+    if (runtime.buzz) {
+      runtime.buzz.open = false;
+      runtime.buzz.selectionTimer = null;
+      runtime.buzz.closeTimer = null;
+      runtime.buzz.closesAt = null;
+    }
     emitState();
   });
 
@@ -1082,11 +1106,15 @@ io.on('connection', (socket) => {
     }
     runtime.buzz.group.push({ playerId: id, receivedAt: now() });
     socket.emit('buzz:received');
-    if (!runtime.buzz.timer) {
-      runtime.buzz.timer = setTimeout(() => {
+    if (!runtime.buzz.selectionTimer) {
+      runtime.buzz.selectionTimer = setTimeout(() => {
         const picked = shuffle(runtime.buzz.group)[0];
+        if (runtime.buzz.closeTimer) clearTimeout(runtime.buzz.closeTimer);
         runtime.buzz.open = false;
         runtime.buzz.selectedPlayerId = picked.playerId;
+        runtime.buzz.selectionTimer = null;
+        runtime.buzz.closeTimer = null;
+        runtime.buzz.closesAt = null;
         const insert = db.prepare('INSERT INTO buzz_event (session_id, session_clue_id, player_id, buzz_group_id, received_at, selected) VALUES (?, ?, ?, ?, ?, ?)');
         for (const buzz of runtime.buzz.group) {
           insert.run(state.session.session_id, state.activeClue.session_clue_id, buzz.playerId, runtime.buzz.groupId, buzz.receivedAt, buzz.playerId === picked.playerId ? 1 : 0);
@@ -1100,8 +1128,12 @@ io.on('connection', (socket) => {
 
   socket.on('buzz:overrideWinner', ({ playerId }) => {
     if (!runtime.buzz) return;
+    clearBuzzTimers();
     runtime.buzz.open = false;
     runtime.buzz.selectedPlayerId = Number(playerId);
+    runtime.buzz.selectionTimer = null;
+    runtime.buzz.closeTimer = null;
+    runtime.buzz.closesAt = null;
     emitState();
   });
 
@@ -1154,8 +1186,15 @@ io.on('connection', (socket) => {
     } else if (state.players.some((player) => !runtime.lockedOut.has(player.player_id))) {
       openBuzzing(state.activeClue);
     } else if (runtime.buzz) {
-      if (runtime.buzz.timer) clearTimeout(runtime.buzz.timer);
-      runtime.buzz = { ...runtime.buzz, open: false, selectedPlayerId: null, timer: null };
+      clearBuzzTimers();
+      runtime.buzz = {
+        ...runtime.buzz,
+        open: false,
+        selectedPlayerId: null,
+        selectionTimer: null,
+        closeTimer: null,
+        closesAt: null
+      };
     }
     emitState();
   });

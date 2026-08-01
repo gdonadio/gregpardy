@@ -22,6 +22,7 @@ let buzzSubmissionState = '';
 let currentBuzzGroupId = '';
 let timerInterval = null;
 let answerTimerInterval = null;
+let buzzTimerInterval = null;
 let finalDraftTimer = null;
 let finalAutoSubmitted = false;
 let lastBuzzSubmitAt = 0;
@@ -295,10 +296,12 @@ function renderScreen() {
   if (state.session.status === 'complete') {
     root.innerHTML = topbarHtml() + finalSummaryHtml();
     setupFinalTimer();
+    setupBuzzTimerBar();
     return;
   }
   if (state.session.status === 'lobby') {
     root.innerHTML = topbarHtml() + lobbyHtml();
+    setupBuzzTimerBar();
     return;
   }
   const active = state.activeClue;
@@ -314,6 +317,7 @@ function renderScreen() {
   root.innerHTML = `${topbarHtml()}<div class="layout"><main>${center}</main><aside class="panel"><h2>Scores</h2>${scoresHtml()}</aside></div>`;
   setupFinalTimer();
   setupAnswerTimer();
+  setupBuzzTimerBar();
 }
 
 function roundCompleteHtml() {
@@ -346,6 +350,7 @@ function activeClueScreenHtml(active) {
   return `<div class="clue-stage"><div>
     <div class="badge">${active.is_daily_double ? 'DAILY DOUBLE' : state.session.status === 'final_clue' ? 'FINAL GREGPARDY' : escapeHtml(activeCategoryName())}</div>
     <div class="clue-text">${escapeHtml(active.clue_text)}</div>
+    ${state.buzz?.open && state.buzz.closesAt ? '<div class="buzz-countdown" aria-label="Buzzing time remaining"><div id="buzzTimerBar" class="buzz-countdown-bar"></div></div>' : ''}
     ${state.buzz?.selectedPlayerId ? `<div class="selected-buzzer">${escapeHtml(playerName(state.buzz.selectedPlayerId))}${timesUpHtml()}</div>` : ''}
     ${state.answerTimerEndsAt ? '<div id="answerTimer" class="timer"></div>' : ''}
   </div></div>`;
@@ -854,6 +859,26 @@ function setupAnswerTimer() {
   answerTimerInterval = null;
   updateAnswerTimer();
   if (state?.answerTimerEndsAt) answerTimerInterval = setInterval(updateAnswerTimer, 100);
+}
+
+function setupBuzzTimerBar() {
+  if (buzzTimerInterval) clearInterval(buzzTimerInterval);
+  buzzTimerInterval = null;
+  updateBuzzTimerBar();
+  if (state?.buzz?.open && state.buzz.closesAt && $('#buzzTimerBar')) {
+    buzzTimerInterval = setInterval(updateBuzzTimerBar, 50);
+  }
+}
+
+function updateBuzzTimerBar() {
+  const bar = $('#buzzTimerBar');
+  if (!bar || !state?.buzz?.closesAt) return;
+  const remainingRatio = Math.max(0, Math.min(1, (state.buzz.closesAt - Date.now()) / 10000));
+  bar.style.width = `${remainingRatio * 100}%`;
+  if (remainingRatio === 0 && buzzTimerInterval) {
+    clearInterval(buzzTimerInterval);
+    buzzTimerInterval = null;
+  }
 }
 
 function updateAnswerTimer() {
