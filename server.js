@@ -103,6 +103,20 @@ const JUDGE_EVENTS = new Set([
   'final:nextReveal',
   'game:end'
 ]);
+const PLAYER_JOIN_STATUSES = new Set([
+  'lobby',
+  'J_categories',
+  'J',
+  'J_complete',
+  'DJ_categories',
+  'DJ',
+  'DJ_complete',
+  'final_pity_vote',
+  'final_wager',
+  'final_clue',
+  'final_answering',
+  'final_judging'
+]);
 
 function currentHostNotice() {
   if (!judgeLease.notice || judgeLease.notice.endsAt <= Date.now()) {
@@ -110,6 +124,10 @@ function currentHostNotice() {
     return null;
   }
   return judgeLease.notice;
+}
+
+function sessionAcceptsPlayers(session) {
+  return PLAYER_JOIN_STATUSES.has(session.status);
 }
 
 function setHostNotice(message) {
@@ -327,6 +345,33 @@ function socketPlayer(socket, sessionId = currentSession().session_id) {
     .get(sessionId, socket.data.profileId) || null;
 }
 
+function restorePlayer(socket) {
+  if (socket.data.requestedRole !== 'player') return null;
+  const profileToken = String(socket.handshake.auth?.profileToken || '');
+  const profile = profileFromToken(profileToken);
+  if (!profile) return null;
+  const session = currentSession();
+  const existingPlayer = db.prepare('SELECT * FROM player WHERE session_id = ? AND profile_id = ?')
+    .get(session.session_id, profile.profile_id);
+  const playedInRoom = db.prepare(`
+    SELECT 1
+    FROM player p
+    JOIN game_session gs ON gs.session_id = p.session_id
+    WHERE p.profile_id = ? AND gs.room_code = ?
+    LIMIT 1
+  `).get(profile.profile_id, session.room_code);
+  if (!existingPlayer && (!playedInRoom || !sessionAcceptsPlayers(session))) return null;
+  if (!existingPlayer && getPlayers(session.session_id).length >= 8) return null;
+  const player = joinProfileToSession(profile, session, profile.current_display_name);
+  socket.data.profileId = profile.profile_id;
+  socket.emit('player:rejoined', {
+    playerId: player.player_id,
+    displayName: player.display_name,
+    sessionId: session.session_id
+  });
+  return player;
+}
+
 function getPlayers(sessionId) {
   return db.prepare('SELECT * FROM player WHERE session_id = ? ORDER BY joined_at, player_id').all(sessionId);
 }
@@ -509,6 +554,7 @@ function publicState(role = 'player', profileId = null) {
     activePlayer: session.active_player_id ? db.prepare('SELECT * FROM player WHERE player_id = ?').get(session.active_player_id) : null,
     buzz: runtime.buzz ? {
       open: runtime.buzz.open,
+      groupId: runtime.buzz.groupId,
       selectedPlayerId: runtime.buzz.selectedPlayerId,
       group: runtime.buzz.group
     } : null,
@@ -818,11 +864,13 @@ io.on('connection', (socket) => {
     const accessToken = signAccessToken();
     socket.emit('auth:authenticated', { accessToken });
     restoreJudge(socket);
+    restorePlayer(socket);
     socket.emit('state:update', publicState(socket.data.role, socket.data.profileId));
   });
 
   if (socket.data.authenticated) {
     restoreJudge(socket);
+    restorePlayer(socket);
     socket.emit('state:update', publicState(socket.data.role, socket.data.profileId));
   } else {
     socket.emit('auth:required');
@@ -860,7 +908,7 @@ io.on('connection', (socket) => {
   socket.on('player:join', ({ roomCode: enteredCode, displayName, profileToken }) => {
     const session = currentSession();
     if (String(enteredCode || '').trim() !== session.room_code) return socket.emit('error:message', 'That room code is not active.');
-    if (!['lobby', 'J_categories', 'J', 'J_complete', 'DJ_categories', 'DJ', 'DJ_complete', 'final_pity_vote', 'final_wager', 'final_clue', 'final_answering', 'final_judging'].includes(session.status)) return socket.emit('error:message', 'This game is not accepting players.');
+    if (!sessionAcceptsPlayers(session)) return socket.emit('error:message', 'This game is not accepting players.');
     const cleanName = String(displayName || '').trim().slice(0, 24);
     if (!cleanName) return socket.emit('error:message', 'Enter a display name.');
     let profile = profileFromToken(profileToken);
@@ -882,7 +930,8 @@ io.on('connection', (socket) => {
     socket.emit('player:joined', {
       playerId: player.player_id,
       profileToken: issuedProfileToken || profileToken,
-      displayName: cleanName
+      displayName: cleanName,
+      sessionId: session.session_id
     });
     emitState();
   });
@@ -897,7 +946,11 @@ io.on('connection', (socket) => {
     }
     const player = joinProfileToSession(profile, session, profile.current_display_name);
     socket.data.profileId = profile.profile_id;
-    socket.emit('player:rejoined', { playerId: player.player_id, displayName: player.display_name });
+    socket.emit('player:rejoined', {
+      playerId: player.player_id,
+      displayName: player.display_name,
+      sessionId: session.session_id
+    });
     emitState();
   });
 
@@ -992,11 +1045,20 @@ io.on('connection', (socket) => {
     const state = publicState();
     const authenticatedPlayer = socketPlayer(socket, state.session.session_id);
     const id = authenticatedPlayer?.player_id;
-    if (!id || Number(playerId) !== id) return;
-    if (!runtime.buzz?.open || !state.activeClue || runtime.lockedOut.has(id)) return;
-    if (!state.players.some((p) => p.player_id === id)) return;
-    if (runtime.buzz.group.some((p) => p.playerId === id)) return;
+    if (!id || Number(playerId) !== id) {
+      return socket.emit('buzz:rejected', { reason: 'Your player connection needs to be restored.' });
+    }
+    if (!state.activeClue) return socket.emit('buzz:rejected', { reason: 'There is no active clue.' });
+    if (!runtime.buzz?.open) return socket.emit('buzz:rejected', { reason: 'Buzzing is closed or that buzz arrived too late.' });
+    if (runtime.lockedOut.has(id)) return socket.emit('buzz:rejected', { reason: 'You are locked out for this clue.' });
+    if (!state.players.some((p) => p.player_id === id)) {
+      return socket.emit('buzz:rejected', { reason: 'You are not joined to this game.' });
+    }
+    if (runtime.buzz.group.some((p) => p.playerId === id)) {
+      return socket.emit('buzz:rejected', { reason: 'Your buzz was already received.' });
+    }
     runtime.buzz.group.push({ playerId: id, receivedAt: now() });
+    socket.emit('buzz:received');
     if (!runtime.buzz.timer) {
       runtime.buzz.timer = setTimeout(() => {
         const picked = shuffle(runtime.buzz.group)[0];

@@ -4,8 +4,8 @@ const { io } = require('socket.io-client');
 const baseUrl = process.env.TEST_URL || 'http://localhost:3127';
 const password = process.env.TEST_PASSWORD || 'test-password';
 
-function connect(role, judgeToken = '') {
-  return io(baseUrl, { transports: ['websocket'], auth: { role, judgeToken } });
+function connect(role, judgeToken = '', profileToken = '') {
+  return io(baseUrl, { transports: ['websocket'], auth: { role, judgeToken, profileToken } });
 }
 
 function once(socket, event) {
@@ -48,7 +48,7 @@ async function claimJudge(socket, { judgeToken = '', takeover = false } = {}) {
 
 async function main() {
   const judge = connect('judge');
-  const playerOne = connect('player');
+  let playerOne = connect('player');
   const playerTwo = connect('player');
   const sockets = [judge, playerOne, playerTwo];
   try {
@@ -75,6 +75,33 @@ async function main() {
     assert.equal(playerStarted.session.status, 'J_categories');
     assert.ok(playerStarted.clues.every((clue) => !Object.hasOwn(clue, 'correct_response')));
     assert.ok(!Object.hasOwn(playerStarted.final.clue || {}, 'correct_response'));
+
+    const roundReadyPromise = stateMatching(judge, (state) => state.session.status === 'J');
+    judge.emit('round:introNext');
+    const roundReady = await roundReadyPromise;
+    const clue = roundReady.clues.find((row) => row.status === 'hidden');
+    const clueReadyPromise = stateMatching(judge, (state) => state.activeClue?.session_clue_id === clue.session_clue_id);
+    judge.emit('clue:select', { sessionClueId: clue.session_clue_id });
+    await clueReadyPromise;
+    const buzzingPromise = stateMatching(judge, (state) => state.buzz?.open);
+    judge.emit('buzz:open');
+    await buzzingPromise;
+
+    playerOne.close();
+    playerOne = connect('player', '', joinedOne.profileToken);
+    sockets.push(playerOne);
+    const restoredPromise = once(playerOne, 'player:rejoined');
+    await authenticate(playerOne);
+    const restoredPlayer = await restoredPromise;
+    assert.equal(restoredPlayer.playerId, joinedOne.playerId);
+    const receivedPromise = once(playerOne, 'buzz:received');
+    const winnerPromise = once(playerOne, 'buzz:winner');
+    playerOne.emit('buzz:submit', { playerId: restoredPlayer.playerId });
+    await receivedPromise;
+    assert.equal((await winnerPromise).playerId, restoredPlayer.playerId);
+    const clueClosedPromise = stateMatching(judge, (state) => !state.activeClue);
+    judge.emit('clue:close');
+    await clueClosedPromise;
 
     const previousRoom = judgeStarted.session.room_code;
     const newLobbyPromise = stateMatching(judge, (state) => state.session.status === 'lobby');

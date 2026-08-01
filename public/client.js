@@ -4,7 +4,8 @@ const socket = io({
   auth: {
     accessToken: localStorage.getItem('gregpardyAccessToken') || '',
     role: pageRole,
-    judgeToken: localStorage.getItem('gregpardyJudgeToken') || ''
+    judgeToken: localStorage.getItem('gregpardyJudgeToken') || '',
+    profileToken: localStorage.getItem('gregpardyProfileToken') || ''
   }
 });
 const $ = (selector) => document.querySelector(selector);
@@ -15,7 +16,10 @@ let state = null;
 let myPlayerId = Number(localStorage.getItem('gregpardyPlayerId') || 0);
 let profileToken = localStorage.getItem('gregpardyProfileToken') || '';
 let authenticated = false;
-let lastRejoinedSessionId = 0;
+let playerReadySessionId = 0;
+let rejoinRequestedSessionId = 0;
+let buzzSubmissionState = '';
+let currentBuzzGroupId = '';
 let timerInterval = null;
 let answerTimerInterval = null;
 let finalDraftTimer = null;
@@ -48,9 +52,16 @@ function rememberRoom(roomCode) {
 socket.on('state:update', (nextState) => {
   authenticated = true;
   state = nextState;
+  const nextBuzzGroupId = String(state.buzz?.groupId || '');
+  if (nextBuzzGroupId !== currentBuzzGroupId) {
+    currentBuzzGroupId = nextBuzzGroupId;
+    buzzSubmissionState = '';
+  }
+  if (playerReadySessionId !== state.session.session_id) playerReadySessionId = 0;
   if (profileToken && joinedRoomCodes().includes(state.session.room_code)
-    && pageRole === 'player' && lastRejoinedSessionId !== state.session.session_id) {
-    lastRejoinedSessionId = state.session.session_id;
+    && pageRole === 'player' && !playerReadySessionId
+    && rejoinRequestedSessionId !== state.session.session_id) {
+    rejoinRequestedSessionId = state.session.session_id;
     emit('player:rejoin', { profileToken });
   }
   render();
@@ -60,6 +71,19 @@ socket.on('state:update', (nextState) => {
       document.querySelectorAll('.host-notice').forEach((notice) => notice.remove());
     }, state.hostNotice.endsAt - Date.now());
   }
+});
+
+socket.on('connect', () => {
+  playerReadySessionId = 0;
+  rejoinRequestedSessionId = 0;
+  buzzSubmissionState = '';
+});
+
+socket.on('disconnect', () => {
+  playerReadySessionId = 0;
+  rejoinRequestedSessionId = 0;
+  buzzSubmissionState = '';
+  if (state && pageRole === 'player') render();
 });
 
 socket.on('auth:required', () => {
@@ -78,18 +102,23 @@ socket.on('auth:authenticated', ({ accessToken }) => {
   authenticated = true;
 });
 
-socket.on('player:joined', ({ playerId, profileToken: nextProfileToken, displayName }) => {
+socket.on('player:joined', ({ playerId, profileToken: nextProfileToken, displayName, sessionId }) => {
   myPlayerId = Number(playerId);
   profileToken = nextProfileToken;
+  playerReadySessionId = Number(sessionId || state?.session?.session_id || 0);
+  rejoinRequestedSessionId = 0;
   localStorage.setItem('gregpardyPlayerId', String(myPlayerId));
   localStorage.setItem('gregpardyProfileToken', profileToken);
+  socket.auth.profileToken = profileToken;
   localStorage.setItem('gregpardyDisplayName', displayName || '');
   if (state?.session?.room_code) rememberRoom(state.session.room_code);
   location.href = '/player';
 });
 
-socket.on('player:rejoined', ({ playerId, displayName }) => {
+socket.on('player:rejoined', ({ playerId, displayName, sessionId }) => {
   myPlayerId = Number(playerId);
+  playerReadySessionId = Number(sessionId || state?.session?.session_id || 0);
+  rejoinRequestedSessionId = 0;
   localStorage.setItem('gregpardyPlayerId', String(myPlayerId));
   localStorage.setItem('gregpardyDisplayName', displayName || '');
   if (state?.session?.room_code) rememberRoom(state.session.room_code);
@@ -98,8 +127,26 @@ socket.on('player:rejoined', ({ playerId, displayName }) => {
 socket.on('player:rejoinFailed', () => {
   profileToken = '';
   myPlayerId = 0;
+  playerReadySessionId = 0;
+  rejoinRequestedSessionId = 0;
+  socket.auth.profileToken = '';
   localStorage.removeItem('gregpardyProfileToken');
   localStorage.removeItem('gregpardyPlayerId');
+});
+
+socket.on('buzz:received', () => {
+  buzzSubmissionState = 'received';
+  render();
+});
+
+socket.on('buzz:rejected', ({ reason } = {}) => {
+  buzzSubmissionState = reason || 'That buzz was not accepted.';
+  if (/connection needs to be restored/i.test(buzzSubmissionState)) {
+    playerReadySessionId = 0;
+    rejoinRequestedSessionId = 0;
+    if (profileToken) emit('player:rejoin', { profileToken });
+  }
+  render();
 });
 
 socket.on('judge:claimed', ({ judgeToken }) => {
@@ -416,8 +463,14 @@ function renderPlayer() {
   const locked = state.lockedOut.includes(me.player_id);
   const eligibleFinal = me.score > 0;
   const finalResponse = finalResponseFor(me.player_id);
-  let body = `<div class="panel stack"><h2>${escapeHtml(me.display_name)}</h2><div class="score">${money(me.score)}</div><p class="muted">Room ${state.session.room_code}</p></div>`;
-  if (state.session.status === 'lobby') {
+  const playerReady = socket.connected && playerReadySessionId === state.session.session_id;
+  let body = `<div class="panel stack">
+    <div class="player-heading"><h2>${escapeHtml(me.display_name)}</h2><span class="connection-status ${playerReady ? 'connected' : 'reconnecting'}">${playerReady ? 'Connected' : 'Reconnecting…'}</span></div>
+    <div class="score">${money(me.score)}</div><p class="muted">Room ${state.session.room_code}</p>
+  </div>`;
+  if (!playerReady) {
+    body += '<div class="panel reconnecting-card"><h2>Reconnecting…</h2><p class="muted">Game controls will return as soon as your player connection is restored.</p></div>';
+  } else if (state.session.status === 'lobby') {
     body += `<div class="panel"><h2>Waiting for the judge</h2><p class="muted">${state.players.length} player(s) joined.</p></div>`;
   } else if (state.session.status === 'final_pity_vote') {
     body += pityVoteHtml(me);
@@ -436,7 +489,10 @@ function renderPlayer() {
   } else if (active?.is_daily_double && state.session.active_player_id === me.player_id) {
     body += `<div class="panel"><h2>Daily Double</h2><p class="muted">${active.status === 'daily_double' ? 'Tell the judge your wager out loud.' : 'Answer out loud when the judge reads the clue.'}</p></div>`;
   } else if (state.buzz?.open && active && !locked) {
-    body += `<button type="button" class="big-button danger" onpointerdown="submitBuzz(event, ${me.player_id})" onclick="submitBuzz(event, ${me.player_id})">BUZZ</button>`;
+    const submitted = ['sending', 'received'].includes(buzzSubmissionState);
+    const label = buzzSubmissionState === 'received' ? 'BUZZ RECEIVED' : buzzSubmissionState === 'sending' ? 'SENDING…' : 'BUZZ';
+    body += `<button type="button" class="big-button ${buzzSubmissionState === 'received' ? 'good' : 'danger'}" onpointerdown="submitBuzz(event, ${me.player_id})" onclick="submitBuzz(event, ${me.player_id})" ${submitted ? 'disabled' : ''}>${label}</button>`;
+    if (buzzSubmissionState && !submitted) body += `<div class="panel error">${escapeHtml(buzzSubmissionState)}</div>`;
   } else if (locked) {
     body += `<div class="panel"><h2>Locked out</h2><p class="muted">Wait for the next clue.</p></div>`;
   } else if (active) {
@@ -455,10 +511,13 @@ function renderPlayer() {
 
 function submitBuzz(event, playerId) {
   event.preventDefault();
+  if (buzzSubmissionState === 'sending' || buzzSubmissionState === 'received') return;
   const nowMs = Date.now();
   if (nowMs - lastBuzzSubmitAt < 500) return;
   lastBuzzSubmitAt = nowMs;
+  buzzSubmissionState = 'sending';
   emit('buzz:submit', { playerId });
+  render();
 }
 
 function submittedPanelHtml(label) {

@@ -494,6 +494,39 @@ textarea { min-height: 8rem; resize: vertical; }
   padding: 16px;
 }
 
+.player-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.player-heading h2 {
+  margin: 0;
+}
+
+.connection-status {
+  border-radius: 999px;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+
+.connection-status.connected {
+  color: #9be7bd;
+  background: rgba(57, 173, 117, 0.16);
+}
+
+.connection-status.reconnecting {
+  color: var(--gold);
+  background: rgba(245, 194, 66, 0.14);
+}
+
+.reconnecting-card {
+  border-color: rgba(245, 194, 66, 0.55);
+  text-align: center;
+}
+
 .big-button {
   width: 100%;
   min-height: 42vh;
