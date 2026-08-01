@@ -164,6 +164,13 @@ textarea { min-height: 8rem; resize: vertical; }
   outline: 2px solid var(--gold);
 }
 
+.score-row.host-player strong,
+.score-row.host-player .score,
+.stage-score.host-player strong,
+.stage-score.host-player span {
+  color: #6da2ff;
+}
+
 .score {
   font-weight: 900;
   color: var(--gold);

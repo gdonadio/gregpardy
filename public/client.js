@@ -191,18 +191,18 @@ function myPlayer() {
 
 function scoresHtml() {
   return `<div class="scores">${state.players.map((p) => `
-    <div class="score-row ${state.session.active_player_id === p.player_id ? 'active' : ''}">
+    <div class="score-row ${state.session.active_player_id === p.player_id ? 'active' : ''} ${p.is_host ? 'host-player' : ''}">
       <strong>${escapeHtml(p.display_name)}</strong>
-      <span class="score">${money(p.score)}</span>
+      <span class="score">${p.is_host ? 'Host/Judge' : money(p.score)}</span>
     </div>
   `).join('')}</div>`;
 }
 
 function stageScoresHtml() {
   return `<div class="stage-scores">${state.players.map((player) => `
-    <div class="stage-score ${state.session.active_player_id === player.player_id ? 'active' : ''}">
+    <div class="stage-score ${state.session.active_player_id === player.player_id ? 'active' : ''} ${player.is_host ? 'host-player' : ''}">
       <strong>${escapeHtml(player.display_name)}</strong>
-      <span>${money(player.score)}</span>
+      <span>${player.is_host ? 'Host/Judge' : money(player.score)}</span>
     </div>
   `).join('')}</div>`;
 }
@@ -233,7 +233,7 @@ function boardHtml({ judge = false } = {}) {
 }
 
 function finalSummaryHtml() {
-  const sorted = [...state.players].sort((a, b) => b.score - a.score);
+  const sorted = state.players.filter((player) => !player.is_host).sort((a, b) => b.score - a.score);
   let lastScore = null;
   let position = 0;
   const rows = sorted.map((player, index) => {
@@ -372,7 +372,7 @@ function finalScreenHtml() {
     ${state.session.status === 'final_clue' ? '<h2>Get ready. Timer has not started.</h2>' : ''}
     ${state.session.status === 'final_answering' ? '<div id="finalTimer" class="timer"></div>' : ''}
     ${state.session.status === 'final_judging' ? '<h2>Answers locked. Judge is scoring.</h2>' : ''}
-    ${state.session.status === 'final_answering' ? `<div class="submission-grid">${state.players.filter((p) => p.score > 0).map((player) => `
+    ${state.session.status === 'final_answering' ? `<div class="submission-grid">${state.players.filter((p) => !p.is_host && p.score > 0).map((player) => `
       <div class="submission-pill ${submitted.has(player.player_id) ? 'submitted' : ''}">${escapeHtml(player.display_name)} ${submitted.has(player.player_id) ? 'SUBMITTED' : '...'}</div>
     `).join('')}</div>` : ''}
   </div></div>`;
@@ -482,7 +482,7 @@ function renderPlayer() {
   }
   const active = state.activeClue;
   const locked = state.lockedOut.includes(me.player_id);
-  const eligibleFinal = me.score > 0;
+  const eligibleFinal = me.score > 0 && !me.is_host;
   const finalResponse = finalResponseFor(me.player_id);
   const playerReady = socket.connected && playerReadySessionId === state.session.session_id;
   let body = `<div class="panel stack">
@@ -509,7 +509,7 @@ function renderPlayer() {
     body += `<div class="panel"><h2>Final results</h2><p class="muted">Watch the main screen.</p></div>`;
   } else if (active?.is_daily_double && state.session.active_player_id === me.player_id) {
     body += `<div class="panel"><h2>Daily Double</h2><p class="muted">${active.status === 'daily_double' ? 'Tell the judge your wager out loud.' : 'Answer out loud when the judge reads the clue.'}</p></div>`;
-  } else if (state.buzz?.open && active && !locked) {
+  } else if (state.buzz?.open && active && !locked && !me.is_host) {
     const submitted = ['sending', 'received'].includes(buzzSubmissionState);
     const label = buzzSubmissionState === 'received' ? 'BUZZ RECEIVED' : buzzSubmissionState === 'sending' ? 'SENDING…' : 'BUZZ';
     body += `<button type="button" class="big-button ${buzzSubmissionState === 'received' ? 'good' : 'danger'}" onpointerdown="submitBuzz(event, ${me.player_id})" onclick="submitBuzz(event, ${me.player_id})" ${submitted ? 'disabled' : ''}>${label}</button>`;
@@ -627,7 +627,7 @@ function renderJudge() {
         ${state.session.status.startsWith('final') ? '' : `<div class="panel"><h2>${state.session.current_round || 'Lobby'} Board</h2>${boardHtml({ judge: true })}</div>`}
       </main>
       <aside class="stack">
-        <div class="panel"><h2>Players</h2>${scoresHtml()}<div class="mini-grid">${state.players.map((p) => `
+        <div class="panel"><h2>Players</h2>${scoresHtml()}<div class="mini-grid">${state.players.filter((p) => !p.is_host).map((p) => `
           <div class="stack">
             <strong>${escapeHtml(p.display_name)}</strong>
             <input id="adj-${p.player_id}" type="number" value="0">
@@ -752,7 +752,7 @@ function judgeClueHtml(active) {
       </div>
       <button class="secondary wide-action" onclick="emit('clue:close')">Close Clue</button>`}
       <p class="muted">Selected: ${selected ? escapeHtml(playerName(selected)) : 'none'}</p>
-      <select id="winner">${state.players.map((p) => `<option value="${p.player_id}" ${selected === p.player_id ? 'selected' : ''}>${escapeHtml(p.display_name)}</option>`).join('')}</select>
+      <select id="winner">${state.players.filter((p) => !p.is_host).map((p) => `<option value="${p.player_id}" ${selected === p.player_id ? 'selected' : ''}>${escapeHtml(p.display_name)}</option>`).join('')}</select>
       <button class="secondary" onclick="emit('buzz:overrideWinner',{playerId:Number(document.querySelector('#winner').value)})">Override Winner</button>`}
     ${daily ? `<div class="actions judge-primary-actions">
       <button class="good" onclick="judgeMark(true)" ${dailyWaiting ? 'disabled' : ''}>Correct</button>
@@ -797,7 +797,7 @@ function judgeMark(isCorrect) {
 
 function judgeFinalHtml() {
   if (!state.session.status.startsWith('final') && state.session.status !== 'complete') return '';
-  const eligible = state.players.filter((p) => p.score > 0);
+  const eligible = state.players.filter((p) => !p.is_host && p.score > 0);
   const responses = new Map(state.final.responses.map((r) => [r.player_id, r]));
   const allJudged = eligible.length && eligible.every((p) => responses.get(p.player_id)?.is_correct !== null && responses.get(p.player_id)?.is_correct !== undefined);
   return `<div class="panel stack">

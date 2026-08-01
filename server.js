@@ -77,6 +77,7 @@ let runtime = {
 let judgeLease = {
   tokenHash: null,
   socketId: null,
+  profileId: null,
   releaseTimer: null,
   notice: null
 };
@@ -258,6 +259,9 @@ function migrate() {
   if (!playerColumns.includes('profile_id')) {
     db.exec('ALTER TABLE player ADD COLUMN profile_id INTEGER REFERENCES player_profile(profile_id)');
   }
+  if (!playerColumns.includes('is_host')) {
+    db.exec('ALTER TABLE player ADD COLUMN is_host INTEGER NOT NULL DEFAULT 0');
+  }
   const legacyPlayers = db.prepare('SELECT player_id, display_name, joined_at FROM player WHERE profile_id IS NULL').all();
   const createLegacyProfile = db.prepare(`
     INSERT INTO player_profile (token_hash, current_display_name, created_at, last_seen_at)
@@ -295,6 +299,7 @@ function getLeaderboard(room = null) {
       WHERE gs.status = 'complete'
         AND gs.started_at IS NOT NULL
         AND p.profile_id IS NOT NULL
+        AND p.is_host = 0
         AND (? IS NULL OR gs.room_code = ?)
     )
     SELECT pp.profile_id,
@@ -349,7 +354,7 @@ function socketPlayer(socket, sessionId = currentSession().session_id) {
 }
 
 function restorePlayer(socket) {
-  if (socket.data.requestedRole !== 'player') return null;
+  if (!['player', 'judge'].includes(socket.data.requestedRole)) return null;
   const profileToken = String(socket.handshake.auth?.profileToken || '');
   const profile = profileFromToken(profileToken);
   if (!profile) return null;
@@ -364,19 +369,25 @@ function restorePlayer(socket) {
     LIMIT 1
   `).get(profile.profile_id, session.room_code);
   if (!existingPlayer && (!playedInRoom || !sessionAcceptsPlayers(session))) return null;
-  if (!existingPlayer && getPlayers(session.session_id).length >= 8) return null;
+  if (!existingPlayer && getContestants(session.session_id).length >= 8) return null;
   const player = joinProfileToSession(profile, session, profile.current_display_name);
   socket.data.profileId = profile.profile_id;
-  socket.emit('player:rejoined', {
-    playerId: player.player_id,
-    displayName: player.display_name,
-    sessionId: session.session_id
-  });
+  if (socket.data.requestedRole === 'player') {
+    socket.emit('player:rejoined', {
+      playerId: player.player_id,
+      displayName: player.display_name,
+      sessionId: session.session_id
+    });
+  }
   return player;
 }
 
 function getPlayers(sessionId) {
   return db.prepare('SELECT * FROM player WHERE session_id = ? ORDER BY joined_at, player_id').all(sessionId);
+}
+
+function getContestants(sessionId) {
+  return getPlayers(sessionId).filter((player) => !player.is_host);
 }
 
 function getCategories(sessionId, round) {
@@ -405,7 +416,7 @@ function getFinal(sessionId) {
 }
 
 function getFinalRevealRows(sessionId) {
-  const players = getPlayers(sessionId);
+  const players = getContestants(sessionId);
   const responses = db.prepare('SELECT * FROM final_response WHERE session_id = ?').all(sessionId);
   const responseMap = new Map(responses.map((response) => [response.player_id, response]));
   return players.map((player) => {
@@ -458,7 +469,7 @@ function completeSession(session) {
 }
 
 function lowestScorePlayer(sessionId) {
-  return db.prepare('SELECT * FROM player WHERE session_id = ? ORDER BY score ASC, joined_at ASC, player_id ASC LIMIT 1').get(sessionId);
+  return db.prepare('SELECT * FROM player WHERE session_id = ? AND is_host = 0 ORDER BY score ASC, joined_at ASC, player_id ASC LIMIT 1').get(sessionId);
 }
 
 function clueDatabaseReady() {
@@ -510,8 +521,8 @@ function publicState(role = 'player', profileId = null) {
     WHERE gsc.session_id = ? AND gsc.status IN ('revealed','buzzing','daily_double','final')
     ORDER BY gsc.revealed_at DESC LIMIT 1
   `).get(session.session_id);
-  const pityCandidates = getPlayers(session.session_id).filter((p) => p.score <= 0);
-  const voters = getPlayers(session.session_id).filter((p) => p.score > 0);
+  const pityCandidates = getContestants(session.session_id).filter((p) => p.score <= 0);
+  const voters = getContestants(session.session_id).filter((p) => p.score > 0);
   const judge = role === 'judge';
   const screen = role === 'screen';
   const revealFinalResponses = ['final_results', 'complete'].includes(session.status);
@@ -739,7 +750,7 @@ function closeActiveClue() {
 }
 
 function finalEligiblePlayers(sessionId) {
-  return getPlayers(sessionId).filter((p) => p.score > 0);
+  return getContestants(sessionId).filter((p) => p.score > 0);
 }
 
 function finalAllJudged(sessionId) {
@@ -765,7 +776,7 @@ function lockFinalAnswers(sessionId) {
 }
 
 function processPityIfReady(sessionId) {
-  const players = getPlayers(sessionId);
+  const players = getContestants(sessionId);
   const voters = players.filter((p) => p.score > 0);
   const candidates = players.filter((p) => p.score <= 0);
   if (!voters.length) {
@@ -799,7 +810,7 @@ function continueFromRoundSummary(sessionId) {
     return;
   }
   if (session.status === 'DJ_complete') {
-    const players = getPlayers(sessionId);
+    const players = getContestants(sessionId);
     const positives = players.filter((p) => p.score > 0);
     if (!positives.length) {
       runtime.lastError = 'At least one player needs a positive score to play Final GREGPARDY.';
@@ -853,8 +864,15 @@ function assignJudge(socket, judgeToken, { takeover = false } = {}) {
   const issuedToken = reclaiming ? judgeToken : crypto.randomBytes(32).toString('base64url');
   judgeLease.tokenHash = tokenHash(issuedToken);
   judgeLease.socketId = socket.id;
+  judgeLease.profileId = socket.data.profileId;
   judgeLease.releaseTimer = null;
   socket.data.role = 'judge';
+  const session = currentSession();
+  db.prepare('UPDATE player SET is_host = 0 WHERE session_id = ?').run(session.session_id);
+  if (socket.data.profileId) {
+    db.prepare('UPDATE player SET is_host = 1 WHERE session_id = ? AND profile_id = ?')
+      .run(session.session_id, socket.data.profileId);
+  }
   socket.emit('judge:claimed', { judgeToken: issuedToken });
 
   if (takeover && !reclaiming) {
@@ -907,14 +925,14 @@ io.on('connection', (socket) => {
     socket.data.authenticated = true;
     const accessToken = signAccessToken();
     socket.emit('auth:authenticated', { accessToken });
-    restoreJudge(socket);
     restorePlayer(socket);
+    restoreJudge(socket);
     socket.emit('state:update', publicState(socket.data.role, socket.data.profileId));
   });
 
   if (socket.data.authenticated) {
-    restoreJudge(socket);
     restorePlayer(socket);
+    restoreJudge(socket);
     socket.emit('state:update', publicState(socket.data.role, socket.data.profileId));
   } else {
     socket.emit('auth:required');
@@ -943,8 +961,18 @@ io.on('connection', (socket) => {
   socket.on('game:new', () => {
     const previous = currentSession();
     if (previous.status !== 'complete') completeSession(previous);
-    db.prepare("INSERT INTO game_session (room_code, status, created_at) VALUES (?, 'lobby', ?)")
+    const info = db.prepare("INSERT INTO game_session (room_code, status, created_at) VALUES (?, 'lobby', ?)")
       .run(previous.room_code, now());
+    const priorHost = judgeLease.profileId
+      ? db.prepare('SELECT 1 FROM player WHERE session_id = ? AND profile_id = ? AND is_host = 1')
+        .get(previous.session_id, judgeLease.profileId)
+      : null;
+    if (priorHost) {
+      const profile = db.prepare('SELECT * FROM player_profile WHERE profile_id = ?').get(judgeLease.profileId);
+      const nextSession = db.prepare('SELECT * FROM game_session WHERE session_id = ?').get(info.lastInsertRowid);
+      const hostPlayer = joinProfileToSession(profile, nextSession, profile.current_display_name);
+      db.prepare('UPDATE player SET is_host = 1 WHERE player_id = ?').run(hostPlayer.player_id);
+    }
     resetRuntime();
     emitState();
   });
@@ -958,7 +986,7 @@ io.on('connection', (socket) => {
     let profile = profileFromToken(profileToken);
     let issuedProfileToken = null;
     if (!profile) {
-      if (getPlayers(session.session_id).length >= 8) return socket.emit('error:message', 'This room already has 8 players.');
+      if (getContestants(session.session_id).length >= 8) return socket.emit('error:message', 'This room already has 8 players.');
       issuedProfileToken = crypto.randomBytes(32).toString('base64url');
       const info = db.prepare(`
         INSERT INTO player_profile (token_hash, current_display_name, created_at, last_seen_at)
@@ -966,7 +994,7 @@ io.on('connection', (socket) => {
       `).run(tokenHash(issuedProfileToken), cleanName, now(), now());
       profile = db.prepare('SELECT * FROM player_profile WHERE profile_id = ?').get(info.lastInsertRowid);
     } else if (!db.prepare('SELECT 1 FROM player WHERE session_id = ? AND profile_id = ?').get(session.session_id, profile.profile_id)
-      && getPlayers(session.session_id).length >= 8) {
+      && getContestants(session.session_id).length >= 8) {
       return socket.emit('error:message', 'This room already has 8 players.');
     }
     const player = joinProfileToSession(profile, session, cleanName);
@@ -985,7 +1013,7 @@ io.on('connection', (socket) => {
     const profile = profileFromToken(profileToken);
     if (!profile) return socket.emit('player:rejoinFailed');
     if (!db.prepare('SELECT 1 FROM player WHERE session_id = ? AND profile_id = ?').get(session.session_id, profile.profile_id)
-      && getPlayers(session.session_id).length >= 8) {
+      && getContestants(session.session_id).length >= 8) {
       return socket.emit('error:message', 'This room already has 8 players.');
     }
     const player = joinProfileToSession(profile, session, profile.current_display_name);
@@ -1017,10 +1045,10 @@ io.on('connection', (socket) => {
 
   socket.on('game:start', ({ allowRepeats = false } = {}) => {
     const session = currentSession();
-    if (getPlayers(session.session_id).length < 2) return socket.emit('error:message', 'GREGPARDY! needs at least 2 players.');
+    if (getContestants(session.session_id).length < 2) return socket.emit('error:message', 'GREGPARDY! needs at least 2 players.');
     try {
       createBoard(session.session_id, !!allowRepeats);
-      const first = shuffle(getPlayers(session.session_id))[0];
+      const first = shuffle(getContestants(session.session_id))[0];
       db.prepare("UPDATE game_session SET status = 'J_categories', current_round = 'J', active_player_id = ?, allow_repeated_categories = ?, started_at = ? WHERE session_id = ?")
         .run(first.player_id, allowRepeats ? 1 : 0, now(), session.session_id);
       runtime.lastError = '';
@@ -1098,7 +1126,7 @@ io.on('connection', (socket) => {
     if (!state.activeClue) return socket.emit('buzz:rejected', { reason: 'There is no active clue.' });
     if (!runtime.buzz?.open) return socket.emit('buzz:rejected', { reason: 'Buzzing is closed or that buzz arrived too late.' });
     if (runtime.lockedOut.has(id)) return socket.emit('buzz:rejected', { reason: 'You are locked out for this clue.' });
-    if (!state.players.some((p) => p.player_id === id)) {
+    if (!state.players.some((p) => p.player_id === id && !p.is_host)) {
       return socket.emit('buzz:rejected', { reason: 'You are not joined to this game.' });
     }
     if (runtime.buzz.group.some((p) => p.playerId === id)) {
@@ -1183,7 +1211,7 @@ io.on('connection', (socket) => {
     if (state.activeClue.is_daily_double) {
       closeActiveClue(state.session.session_id);
       advanceAfterRound(state.session.session_id);
-    } else if (state.players.some((player) => !runtime.lockedOut.has(player.player_id))) {
+    } else if (state.players.some((player) => !player.is_host && !runtime.lockedOut.has(player.player_id))) {
       openBuzzing(state.activeClue);
     } else if (runtime.buzz) {
       clearBuzzTimers();
@@ -1224,7 +1252,7 @@ io.on('connection', (socket) => {
   socket.on('pity:submitVote', ({ voterPlayerId, targetPlayerId, vote }) => {
     const session = currentSession();
     const authenticatedPlayer = socketPlayer(socket, session.session_id);
-    if (!authenticatedPlayer || authenticatedPlayer.player_id !== Number(voterPlayerId)) return;
+    if (!authenticatedPlayer || authenticatedPlayer.is_host || authenticatedPlayer.player_id !== Number(voterPlayerId)) return;
     const cleanVote = vote === 'yes' ? 'yes' : 'no';
     db.prepare('INSERT OR REPLACE INTO pity_vote (session_id, target_player_id, voter_player_id, vote, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(session.session_id, Number(targetPlayerId), Number(voterPlayerId), cleanVote, now());
@@ -1236,7 +1264,7 @@ io.on('connection', (socket) => {
     const session = currentSession();
     const player = socketPlayer(socket, session.session_id);
     if (!player || player.player_id !== Number(playerId)) return;
-    if (!player || player.score <= 0) return;
+    if (!player || player.is_host || player.score <= 0) return;
     const cleanWager = Math.max(0, Math.min(Number(wager), player.score));
     db.prepare('INSERT OR REPLACE INTO final_response (session_id, player_id, wager, submitted_at) VALUES (?, ?, ?, ?)')
       .run(session.session_id, player.player_id, cleanWager, now());
@@ -1247,7 +1275,7 @@ io.on('connection', (socket) => {
     const session = currentSession();
     if (session.status !== 'final_answering') return;
     const player = socketPlayer(socket, session.session_id);
-    if (!player || player.player_id !== Number(playerId)) return;
+    if (!player || player.is_host || player.player_id !== Number(playerId)) return;
     db.prepare('UPDATE final_response SET draft_text = ? WHERE session_id = ? AND player_id = ?')
       .run(String(responseText || '').trim().slice(0, 300), session.session_id, Number(playerId));
   });
@@ -1282,7 +1310,7 @@ io.on('connection', (socket) => {
   socket.on('final:submitResponse', ({ playerId, responseText }) => {
     const session = currentSession();
     const player = socketPlayer(socket, session.session_id);
-    if (!player || player.player_id !== Number(playerId)) return;
+    if (!player || player.is_host || player.player_id !== Number(playerId)) return;
     if (session.status !== 'final_answering') return socket.emit('error:message', 'Final answers are locked.');
     if (runtime.finalAnswerEndsAt && Date.now() > runtime.finalAnswerEndsAt) {
       lockFinalAnswers(session.session_id);

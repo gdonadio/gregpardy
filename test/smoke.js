@@ -176,6 +176,23 @@ async function main() {
     const reclaimedState = await authenticate(reconnectingJudge);
     assert.equal(reclaimedState.isJudge, true);
     assert.equal((await reclaimedPromise).judgeToken, secondClaim.judgeToken);
+
+    await join(playerOne, chosenRoom.session.room_code, 'Smoke One', joinedOne.profileToken);
+    const playerJudge = connect('judge', '', joinedOne.profileToken);
+    sockets.push(playerJudge);
+    await authenticate(playerJudge);
+    const playerJudgeClaim = await claimJudge(playerJudge, { takeover: true });
+    const markedHost = playerJudgeClaim.state.players.find((player) => player.display_name === 'Smoke One');
+    assert.equal(markedHost.is_host, 1);
+
+    const carriedHostPromise = stateMatching(
+      playerJudge,
+      (state) => state.session.status === 'lobby'
+        && state.session.session_id !== playerJudgeClaim.state.session.session_id
+        && state.players.some((player) => player.display_name === 'Smoke One' && player.is_host === 1)
+    );
+    playerJudge.emit('game:new');
+    await carriedHostPromise;
     console.log('Smoke test passed');
   } finally {
     sockets.forEach((socket) => socket.close());
