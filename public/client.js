@@ -730,11 +730,13 @@ function judgeClueHtml(active) {
   const dailyWaiting = daily && active.status === 'daily_double';
   const dailyLocked = daily && !dailyWaiting;
   const dailyWager = daily ? Number(state.dailyDoubleWager || Math.min(maxWager, active.display_value || 1000)) : 0;
+  const roundWagerLimit = active.round === 'DJ' ? 2000 : 1000;
   const playerAnswering = !daily && !!selected;
   return `<div class="panel stack">
     <h2>${daily ? 'Daily Double' : 'Current Clue'}</h2>
     ${dailyWaiting ? `<p class="answer">Category: ${escapeHtml(activeCategoryName())}</p><p class="muted">Enter the wager, then show the clue.</p>` : `<p>${escapeHtml(active.clue_text)}</p><p class="answer">Response: ${escapeHtml(active.correct_response)}</p>`}
-    ${daily ? `<label>Wager<input id="ddWager" type="number" min="5" max="${maxWager}" value="${dailyWager}" ${dailyLocked ? 'disabled' : ''}></label>
+    ${daily ? `<p class="muted">${escapeHtml(activePlayer?.display_name || 'The player')} may wager up to ${money(roundWagerLimit)} or their entire current score, whichever is higher. Their maximum wager is ${money(maxWager)}.</p>
+      <label>Wager<input id="ddWager" type="number" min="5" max="${maxWager}" value="${dailyWager}" ${dailyLocked ? 'disabled' : ''}></label>
       ${dailyLocked ? `<p class="locked-wager">Locked wager: ${money(dailyWager)}</p>` : ''}
       <div class="actions">
         <button class="secondary" onclick="document.querySelector('#ddWager').value=${maxWager}" ${dailyLocked ? 'disabled' : ''}>True Daily Double</button>

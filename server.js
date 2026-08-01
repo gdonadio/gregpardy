@@ -672,10 +672,15 @@ function scorePlayer(sessionId, playerId, clueId, delta, reason) {
 }
 
 function dailyDoubleScoreValue(activeClue, wager) {
-  const submittedWager = Number(wager);
   const storedWager = runtime.dailyDoubleWagers.get(activeClue.session_clue_id);
-  const value = Number.isFinite(submittedWager) && submittedWager > 0 ? submittedWager : storedWager;
+  const submittedWager = Number(wager);
+  const value = storedWager || (Number.isFinite(submittedWager) && submittedWager > 0 ? submittedWager : null);
   return money(value || activeClue.display_value);
+}
+
+function dailyDoubleMaxWager(activeClue, player) {
+  const roundMaximum = activeClue.round === 'DJ' ? 2000 : 1000;
+  return Math.max(roundMaximum, money(player?.score));
 }
 
 function openBuzzing(activeClue) {
@@ -1039,7 +1044,8 @@ io.on('connection', (socket) => {
   socket.on('clue:showDailyDouble', ({ wager } = {}) => {
     const state = publicState();
     if (!state.activeClue?.is_daily_double || state.activeClue.status !== 'daily_double') return;
-    const value = money(wager || state.activeClue.display_value);
+    const maxWager = dailyDoubleMaxWager(state.activeClue, state.activePlayer);
+    const value = Math.max(5, Math.min(money(wager || state.activeClue.display_value), maxWager));
     runtime.dailyDoubleWagers.set(state.activeClue.session_clue_id, value);
     db.prepare("UPDATE game_session_clue SET status = 'revealed' WHERE session_clue_id = ?").run(state.activeClue.session_clue_id);
     emitState();
