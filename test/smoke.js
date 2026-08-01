@@ -58,7 +58,12 @@ async function main() {
       authenticate(playerTwo)
     ]);
     const initialJudge = await claimJudge(judge);
-    const judgeLobby = initialJudge.state;
+    const freshLobbyPromise = stateMatching(
+      judge,
+      (state) => state.session.status === 'lobby' && state.session.session_id !== initialJudge.state.session.session_id
+    );
+    judge.emit('game:create', { roomCode: '' });
+    const judgeLobby = await freshLobbyPromise;
     const joinedOne = await join(playerOne, judgeLobby.session.room_code, 'Smoke One');
     const joinedTwo = await join(playerTwo, judgeLobby.session.room_code, 'Smoke Two');
     assert.ok(joinedOne.profileToken);
@@ -99,6 +104,27 @@ async function main() {
     playerOne.emit('buzz:submit', { playerId: restoredPlayer.playerId });
     await receivedPromise;
     assert.equal((await winnerPromise).playerId, restoredPlayer.playerId);
+
+    const reopenedPromise = stateMatching(
+      judge,
+      (state) => state.buzz?.open && state.buzz.selectedPlayerId === null && state.lockedOut.includes(restoredPlayer.playerId)
+    );
+    judge.emit('answer:incorrect', { playerId: restoredPlayer.playerId });
+    await reopenedPromise;
+
+    const secondReceivedPromise = once(playerTwo, 'buzz:received');
+    const secondWinnerPromise = once(playerTwo, 'buzz:winner');
+    playerTwo.emit('buzz:submit', { playerId: joinedTwo.playerId });
+    await secondReceivedPromise;
+    assert.equal((await secondWinnerPromise).playerId, joinedTwo.playerId);
+
+    const exhaustedPromise = stateMatching(
+      judge,
+      (state) => state.buzz?.open === false && state.buzz.selectedPlayerId === null && state.lockedOut.length === 2
+    );
+    judge.emit('answer:incorrect', { playerId: joinedTwo.playerId });
+    await exhaustedPromise;
+
     const clueClosedPromise = stateMatching(judge, (state) => !state.activeClue);
     judge.emit('clue:close');
     await clueClosedPromise;

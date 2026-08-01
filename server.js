@@ -99,6 +99,7 @@ const JUDGE_EVENTS = new Set([
   'round:advance',
   'final:revealClue',
   'final:startTimer',
+  'final:addTime',
   'final:judgeResponse',
   'final:nextReveal',
   'game:end'
@@ -677,6 +678,26 @@ function dailyDoubleScoreValue(activeClue, wager) {
   return money(value || activeClue.display_value);
 }
 
+function openBuzzing(activeClue) {
+  if (runtime.buzz?.timer) clearTimeout(runtime.buzz.timer);
+  runtime.buzz = {
+    open: true,
+    groupId: crypto.randomUUID(),
+    group: [],
+    selectedPlayerId: null,
+    timer: null
+  };
+  runtime.answerTimedOut = false;
+  db.prepare("UPDATE game_session_clue SET status = 'buzzing' WHERE session_clue_id = ?")
+    .run(activeClue.session_clue_id);
+}
+
+function scheduleFinalAnswerLock(sessionId) {
+  if (runtime.finalTimer) clearTimeout(runtime.finalTimer);
+  const remainingMs = Math.max(0, runtime.finalAnswerEndsAt - Date.now());
+  runtime.finalTimer = setTimeout(() => lockFinalAnswers(sessionId), remainingMs);
+}
+
 function allRoundCluesComplete(sessionId, round) {
   const row = db.prepare("SELECT COUNT(*) AS remaining FROM game_session_clue WHERE session_id = ? AND round = ? AND status <> 'completed'").get(sessionId, round);
   return row.remaining === 0;
@@ -1027,11 +1048,7 @@ io.on('connection', (socket) => {
   socket.on('buzz:open', () => {
     const state = publicState();
     if (!state.activeClue) return;
-    if (runtime.buzz?.timer) clearTimeout(runtime.buzz.timer);
-    const groupId = crypto.randomUUID();
-    runtime.buzz = { open: true, groupId, group: [], selectedPlayerId: null, timer: null };
-    runtime.answerTimedOut = false;
-    db.prepare("UPDATE game_session_clue SET status = 'buzzing' WHERE session_clue_id = ?").run(state.activeClue.session_clue_id);
+    openBuzzing(state.activeClue);
     emitState();
   });
 
@@ -1128,9 +1145,11 @@ io.on('connection', (socket) => {
     if (state.activeClue.is_daily_double) {
       closeActiveClue(state.session.session_id);
       advanceAfterRound(state.session.session_id);
+    } else if (state.players.some((player) => !runtime.lockedOut.has(player.player_id))) {
+      openBuzzing(state.activeClue);
     } else if (runtime.buzz) {
-      runtime.buzz.open = false;
-      runtime.buzz.selectedPlayerId = null;
+      if (runtime.buzz.timer) clearTimeout(runtime.buzz.timer);
+      runtime.buzz = { ...runtime.buzz, open: false, selectedPlayerId: null, timer: null };
     }
     emitState();
   });
@@ -1201,10 +1220,17 @@ io.on('connection', (socket) => {
   socket.on('final:startTimer', () => {
     const session = currentSession();
     if (session.status !== 'final_clue') return;
-    if (runtime.finalTimer) clearTimeout(runtime.finalTimer);
     runtime.finalAnswerEndsAt = Date.now() + FINAL_ANSWER_MS;
     db.prepare("UPDATE game_session SET status = 'final_answering' WHERE session_id = ?").run(session.session_id);
-    runtime.finalTimer = setTimeout(() => lockFinalAnswers(session.session_id), FINAL_ANSWER_MS);
+    scheduleFinalAnswerLock(session.session_id);
+    emitState();
+  });
+
+  socket.on('final:addTime', () => {
+    const session = currentSession();
+    if (session.status !== 'final_answering' || !runtime.finalAnswerEndsAt) return;
+    runtime.finalAnswerEndsAt = Math.max(Date.now(), runtime.finalAnswerEndsAt) + 10000;
+    scheduleFinalAnswerLock(session.session_id);
     emitState();
   });
 

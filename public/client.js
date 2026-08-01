@@ -741,8 +741,7 @@ function judgeClueHtml(active) {
         ${dailyWaiting ? `<button onclick="showDailyDoubleClue()">Show Clue</button>` : ''}
       </div>` : `
       ${playerAnswering ? judgeAnswerPromptHtml(active) : `<div class="actions judge-primary-actions">
-        <button onclick="emit('buzz:open')">Open Buzzing</button>
-        <button class="secondary" onclick="emit('buzz:close')">Close Buzzing</button>
+        ${judgeBuzzToggleHtml()}
       </div>
       <button class="secondary wide-action" onclick="emit('clue:close')">Close Clue</button>`}
       <p class="muted">Selected: ${selected ? escapeHtml(playerName(selected)) : 'none'}</p>
@@ -765,8 +764,15 @@ function judgeAnswerPromptHtml(active) {
       <button class="danger" onclick="judgeMark(false)">Incorrect</button>
     </div>
     <button class="secondary" onclick="emit('answer:startTimer')">Give Them 5 Seconds</button>
-    <button class="blue" onclick="emit('buzz:open')">Reopen Buzzing</button>
+    ${judgeBuzzToggleHtml()}
   </div>`;
+}
+
+function judgeBuzzToggleHtml() {
+  const buzzingOpen = Boolean(state.buzz?.open);
+  const eventName = buzzingOpen ? 'buzz:close' : 'buzz:open';
+  const label = buzzingOpen ? 'Close Buzzing' : 'Open Buzzing';
+  return `<button class="${buzzingOpen ? 'secondary' : 'blue'}" onclick="emit('${eventName}')">${label}</button>`;
 }
 
 function showDailyDoubleClue() {
@@ -794,6 +800,7 @@ function judgeFinalHtml() {
     <div class="actions">
       <button onclick="emit('final:revealClue')" ${state.session.status !== 'final_wager' ? 'disabled' : ''}>Reveal Final Clue</button>
       ${state.session.status === 'final_clue' ? `<button onclick="emit('final:startTimer')">Start 30s Timer</button>` : ''}
+      ${state.session.status === 'final_answering' ? `<button class="blue" onclick="emit('final:addTime')">Add 10 More Seconds</button>` : ''}
       ${state.session.status === 'final_results' ? `<button onclick="emit('final:nextReveal')">${finalRevealButtonLabel()}</button>` : ''}
       <button class="good" onclick="emit('game:end')" ${!allJudged && state.session.status !== 'final_results' ? 'disabled' : ''}>End Game</button>
     </div>
