@@ -51,6 +51,35 @@ input, textarea, select {
   color: var(--text);
 }
 
+.password-field {
+  position: relative;
+  display: block;
+  margin-top: 0.35rem;
+}
+
+.password-field input {
+  padding-right: 3.3rem;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.4rem;
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0;
+  transform: translateY(-50%);
+  color: var(--text);
+  background: transparent;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.password-toggle:hover,
+.password-toggle:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+}
+
 textarea { min-height: 8rem; resize: vertical; }
 
 .app {

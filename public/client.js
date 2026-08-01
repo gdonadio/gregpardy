@@ -441,10 +441,26 @@ function renderAuth() {
   root.innerHTML = `<form class="join-box panel" onsubmit="submitPassword(event)">
     <h1 class="brand">GREGPARDY!</h1>
     <h2>Enter the game password</h2>
-    <label>Password<input id="gamePassword" type="password" autocomplete="current-password" autofocus></label>
+    <label>Password
+      <span class="password-field">
+        <input id="gamePassword" type="password" autocomplete="current-password" autofocus>
+        <button type="button" class="password-toggle" onclick="togglePasswordVisibility()" aria-label="Show password" aria-pressed="false">&#128065;</button>
+      </span>
+    </label>
     <button>Continue</button>
     <p id="authError" class="error"></p>
   </form>`;
+}
+
+function togglePasswordVisibility() {
+  const input = $('#gamePassword');
+  const button = document.querySelector('.password-toggle');
+  if (!input || !button) return;
+  const showing = input.type === 'text';
+  input.type = showing ? 'password' : 'text';
+  button.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+  button.setAttribute('aria-pressed', String(!showing));
+  input.focus();
 }
 
 function submitPassword(event) {
