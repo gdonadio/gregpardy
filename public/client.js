@@ -342,13 +342,13 @@ function categoryIntroHtml() {
 function activeClueScreenHtml(active) {
   if (active.is_daily_double && active.status === 'daily_double') {
     return `<div class="clue-stage daily-double-stage"><div>
-      <div class="badge">DAILY DOUBLE</div>
+      <div class="badge">DAILY DOUBLE — ${escapeHtml(activeCategoryName())}</div>
       <div class="clue-text">${escapeHtml(activeCategoryName())}</div>
       ${stageScoresHtml()}
     </div></div>`;
   }
   return `<div class="clue-stage"><div>
-    <div class="badge">${active.is_daily_double ? 'DAILY DOUBLE' : state.session.status === 'final_clue' ? 'FINAL GREGPARDY' : escapeHtml(activeCategoryName())}</div>
+    <div class="badge">${active.is_daily_double ? `DAILY DOUBLE — ${escapeHtml(activeCategoryName())}` : state.session.status === 'final_clue' ? 'FINAL GREGPARDY' : escapeHtml(activeCategoryName())}</div>
     <div class="clue-text">${escapeHtml(active.clue_text)}</div>
     ${state.buzz?.open && state.buzz.closesAt ? '<div class="buzz-countdown" aria-label="Buzzing time remaining"><div id="buzzTimerBar" class="buzz-countdown-bar"></div></div>' : ''}
     ${state.buzz?.selectedPlayerId ? `<div class="selected-buzzer">${escapeHtml(playerName(state.buzz.selectedPlayerId))}${timesUpHtml()}</div>` : ''}
@@ -747,9 +747,7 @@ function judgeClueHtml(active) {
         <button class="secondary" onclick="document.querySelector('#ddWager').value=${maxWager}" ${dailyLocked ? 'disabled' : ''}>True Daily Double</button>
         ${dailyWaiting ? `<button onclick="showDailyDoubleClue()">Show Clue</button>` : ''}
       </div>` : `
-      ${playerAnswering ? judgeAnswerPromptHtml(active) : `<div class="actions judge-primary-actions">
-        ${judgeBuzzToggleHtml()}
-      </div>
+      ${playerAnswering ? judgeAnswerPromptHtml(active) : `${judgeBuzzControlHtml()}
       <button class="secondary wide-action" onclick="emit('clue:close')">Close Clue</button>`}
       <p class="muted">Selected: ${selected ? escapeHtml(playerName(selected)) : 'none'}</p>
       <select id="winner">${state.players.filter((p) => !p.is_host).map((p) => `<option value="${p.player_id}" ${selected === p.player_id ? 'selected' : ''}>${escapeHtml(p.display_name)}</option>`).join('')}</select>
@@ -771,15 +769,19 @@ function judgeAnswerPromptHtml(active) {
       <button class="danger" onclick="judgeMark(false)">Incorrect</button>
     </div>
     <button class="secondary" onclick="emit('answer:startTimer')">Give Them 5 Seconds</button>
-    ${judgeBuzzToggleHtml()}
+    ${judgeBuzzControlHtml()}
   </div>`;
 }
 
-function judgeBuzzToggleHtml() {
+function judgeBuzzControlHtml() {
   const buzzingOpen = Boolean(state.buzz?.open);
   const eventName = buzzingOpen ? 'buzz:close' : 'buzz:open';
-  const label = buzzingOpen ? 'Close Buzzing' : 'Open Buzzing';
-  return `<button class="${buzzingOpen ? 'secondary' : 'blue'}" onclick="emit('${eventName}')">${label}</button>`;
+  const label = buzzingOpen ? 'CLOSE BUZZING' : 'OPEN BUZZING';
+  const status = buzzingOpen ? 'BUZZING IS OPEN' : 'BUZZING IS CLOSED';
+  return `<div class="stack judge-buzz-control">
+    <div class="judge-buzz-status ${buzzingOpen ? 'open' : 'closed'}">${status}</div>
+    <button class="${buzzingOpen ? 'secondary' : 'blue'}" onclick="emit('${eventName}')">${label}</button>
+  </div>`;
 }
 
 function showDailyDoubleClue() {

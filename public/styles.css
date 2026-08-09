@@ -171,6 +171,29 @@ textarea { min-height: 8rem; resize: vertical; }
   color: #6da2ff;
 }
 
+.judge-buzz-control {
+  gap: 10px;
+}
+
+.judge-buzz-status {
+  border: 2px solid currentColor;
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  font-size: 1.25rem;
+  font-weight: 950;
+}
+
+.judge-buzz-status.open {
+  color: #9be7bd;
+  background: rgba(57, 173, 117, 0.14);
+}
+
+.judge-buzz-status.closed {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.05);
+}
+
 .score {
   font-weight: 900;
   color: var(--gold);
