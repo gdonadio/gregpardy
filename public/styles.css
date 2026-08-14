@@ -247,6 +247,7 @@ textarea { min-height: 8rem; resize: vertical; }
 }
 
 .clue-stage {
+  position: relative;
   min-height: 62vh;
   display: grid;
   place-items: center;

@@ -1196,6 +1196,7 @@ io.on('connection', (socket) => {
       : runtime.buzz?.selectedPlayerId;
     if (!state.activeClue || !hasAnsweringPlayer) return;
     if (runtime.answerTimer) clearTimeout(runtime.answerTimer);
+    runtime.answerTimedOut = false;
     runtime.answerTimerEndsAt = Date.now() + 5000;
     runtime.answerTimer = setTimeout(() => {
       runtime.answerTimerEndsAt = null;
