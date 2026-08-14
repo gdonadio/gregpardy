@@ -23,8 +23,9 @@ let currentBuzzGroupId = '';
 let timerInterval = null;
 let answerTimerInterval = null;
 let buzzTimerInterval = null;
-let finalDraftTimer = null;
 let finalAutoSubmitted = false;
+let finalDraftText = '';
+let finalDraftSessionId = 0;
 let lastBuzzSubmitAt = 0;
 let judgeRevoked = false;
 let hostNoticeTimer = null;
@@ -52,7 +53,13 @@ function rememberRoom(roomCode) {
 
 socket.on('state:update', (nextState) => {
   authenticated = true;
+  const activeDraft = $('#responseText');
+  if (activeDraft) finalDraftText = activeDraft.value;
   state = nextState;
+  if (finalDraftSessionId !== state.session.session_id) {
+    finalDraftSessionId = state.session.session_id;
+    finalDraftText = '';
+  }
   const nextBuzzGroupId = String(state.buzz?.groupId || '');
   if (nextBuzzGroupId !== currentBuzzGroupId) {
     currentBuzzGroupId = nextBuzzGroupId;
@@ -229,11 +236,12 @@ function boardHtml({ judge = false } = {}) {
     const dd = judge && clue.is_daily_double ? ' dd' : '';
     return `<button class="cell ${used ? 'used' : ''}${locked ? ' locked' : ''}${dd}" ${onclick} ${used || locked ? 'disabled' : ''}>${used ? '' : money(clue.display_value)}</button>`;
   }).join('')).join('');
-  return `<div class="board ${judge ? 'judge-board' : ''}">${header}${rows}</div>`;
+  return `<div class="board ${judge ? 'judge-board' : ''}" style="--category-count:${state.categories.length}">${header}${rows}</div>`;
 }
 
 function finalSummaryHtml() {
   const sorted = state.players.filter((player) => !player.is_host).sort((a, b) => b.score - a.score);
+  const winningScore = sorted[0]?.score;
   let lastScore = null;
   let position = 0;
   const rows = sorted.map((player, index) => {
@@ -245,7 +253,7 @@ function finalSummaryHtml() {
     <div class="clue-text">Final Standings</div>
     <div style="height:20px"></div>
     <div class="final-board">${rows.map(({ player, position: place }) => `
-      <div class="final-row"><strong>${place}. ${escapeHtml(player.display_name)}</strong><span>${money(player.score)}</span></div>
+      <div class="final-row ${player.score === winningScore ? 'winner' : ''}"><strong>${place}. ${escapeHtml(player.display_name)}</strong><span>${money(player.score)}</span></div>
     `).join('')}</div>
   </div></div>`;
 }
@@ -271,6 +279,7 @@ function leaderboardHtml(rows, title, emptyMessage) {
 }
 
 function lobbyHtml() {
+  const waitingPlayers = state.players.filter((player) => !player.is_host);
   return `<div class="lobby-grid">
     <div class="panel lobby-join">
       ${state.databaseReady === false ? '<div class="setup-notice">Setup mode: the clue database still needs to be uploaded.</div>' : ''}
@@ -278,8 +287,8 @@ function lobbyHtml() {
       <h2>Scan to Join</h2>
       <img class="qr-code" src="${escapeHtml(state.qrUrl)}" alt="QR code to join room ${escapeHtml(state.session.room_code)}">
       <p class="join-url">${escapeHtml(state.joinUrl)}</p>
-      <p>${state.players.length} player${state.players.length === 1 ? '' : 's'} waiting</p>
-      <div class="lobby-player-list">${state.players.map((player) => `<span class="badge">${escapeHtml(player.display_name)}</span>`).join('')}</div>
+      <p>${waitingPlayers.length} player${waitingPlayers.length === 1 ? '' : 's'} waiting</p>
+      <div class="lobby-player-list">${waitingPlayers.map((player) => `<span class="badge">${escapeHtml(player.display_name)}</span>`).join('')}</div>
     </div>
     <div class="stack">
       ${leaderboardHtml(state.leaderboard, 'All-Time Leaders', 'Leaderboard results will appear after the first completed game.')}
@@ -384,10 +393,13 @@ function finalResultsRevealHtml() {
   const step = Number(state.finalRevealStep || 0);
   if (step > rows.length * 5) return finalSummaryHtml();
   if (step === 0) {
+    const scoreboard = [...rows].sort((a, b) => b.preFinalScore - a.preFinalScore || a.player.display_name.localeCompare(b.player.display_name));
     return `<div class="clue-stage"><div>
-      <div class="badge">FINAL RESULTS</div>
-      <div class="clue-text">Final Results</div>
-      <h2>Judge will reveal each player.</h2>
+      <div class="badge">BEFORE FINAL GREGPARDY</div>
+      <div class="clue-text">Scores Before Final</div>
+      <div class="final-board">${scoreboard.map((row) => `
+        <div class="final-row"><strong>${escapeHtml(row.player.display_name)}</strong><span>${money(row.preFinalScore)}</span></div>
+      `).join('')}</div>
     </div></div>`;
   }
   const index = Math.floor((step - 1) / 5);
@@ -497,12 +509,16 @@ function renderPlayer() {
     body += pityVoteHtml(me);
   } else if (state.session.status === 'final_wager' && eligibleFinal) {
     if (finalResponse) body += submittedPanelHtml('Wager submitted');
-    else body += `<form class="panel stack" onsubmit="submitWager(event)"><h2>Final Wager</h2><input id="wager" type="number" min="0" max="${me.score}" value="0"><button>Submit Wager</button></form>`;
+    else body += `<form class="panel stack" onsubmit="submitWager(event)"><h2>Final Wager</h2><input id="wager" type="text" inputmode="numeric" pattern="[0-9]*" value="0" oninput="normalizeWagerInput(this)"><button>Submit Wager</button></form>`;
   } else if (state.session.status === 'final_clue' && eligibleFinal) {
     body += `<div class="panel"><h2>Final clue revealed</h2><p class="muted">Wait for the judge to start the timer.</p></div>`;
   } else if (state.session.status === 'final_answering' && eligibleFinal) {
-    if (finalResponse?.response_text) body += submittedPanelHtml('Answer submitted');
-    else body += `<form class="panel stack" onsubmit="submitFinalResponse(event)"><h2>Final Response</h2><p class="muted">Anything in this text box at the end of the countdown will be submitted.</p><div id="finalTimer" class="phone-timer"></div><textarea id="responseText" oninput="saveFinalDraft()"></textarea><button>Submit Response</button></form>`;
+    if (finalResponse?.submitted_at) body += submittedPanelHtml('Answer submitted');
+    else {
+      const savedDraft = finalDraftText || finalResponse?.draft_text || '';
+      finalDraftText = savedDraft;
+      body += `<form class="panel stack" onsubmit="submitFinalResponse(event)"><h2>Final Response</h2><p class="muted">Anything in this text box at the end of the countdown will be submitted.</p><div id="finalTimer" class="phone-timer"></div><textarea id="responseText" oninput="saveFinalDraft()">${escapeHtml(savedDraft)}</textarea><button>Submit Response</button></form>`;
+    }
   } else if (state.session.status === 'final_judging' && eligibleFinal) {
     body += `<div class="panel"><h2>Answers locked</h2><p class="muted">${finalResponse?.response_text ? 'Your answer was submitted.' : 'No answer was submitted before time expired.'}</p></div>`;
   } else if (state.session.status === 'final_results') {
@@ -563,8 +579,13 @@ function pityVoteHtml(me) {
 function submitWager(event) {
   event.preventDefault();
   if (!window.confirm('Submit this Final Jeopardy wager? This is your final decision.')) return;
-  emit('final:submitWager', { playerId: myPlayerId, wager: Number($('#wager').value) });
+  emit('final:submitWager', { playerId: myPlayerId, wager: $('#wager').value });
   event.currentTarget.innerHTML = submittedPanelHtml('Wager submitted');
+}
+
+function normalizeWagerInput(input) {
+  const digits = input.value.replace(/\D/g, '');
+  input.value = digits.replace(/^0+(?=\d)/, '') || '0';
 }
 
 function submitFinalResponse(event) {
@@ -575,10 +596,8 @@ function submitFinalResponse(event) {
 }
 
 function saveFinalDraft() {
-  if (finalDraftTimer) clearTimeout(finalDraftTimer);
-  finalDraftTimer = setTimeout(() => {
-    emit('final:saveDraft', { playerId: myPlayerId, responseText: $('#responseText')?.value || '' });
-  }, 120);
+  finalDraftText = $('#responseText')?.value || '';
+  emit('final:saveDraft', { playerId: myPlayerId, responseText: finalDraftText });
 }
 
 function autoSubmitFinalResponse() {
@@ -586,8 +605,8 @@ function autoSubmitFinalResponse() {
   const input = $('#responseText');
   if (!input || state?.session?.status !== 'final_answering') return;
   finalAutoSubmitted = true;
+  input.disabled = true;
   emit('final:saveDraft', { playerId: myPlayerId, responseText: input.value });
-  emit('final:submitResponse', { playerId: myPlayerId, responseText: input.value });
   const form = input.closest('form');
   if (form) form.innerHTML = submittedPanelHtml('Answer submitted at time');
 }
@@ -717,7 +736,14 @@ function confirmNewRoom() {
 function confirmNewGame() {
   const unfinished = state.session.status !== 'complete';
   if (!unfinished || window.confirm('Start a new game in this room? The current game will be recorded as complete.')) {
-    emit('game:new');
+    const requestedCount = window.prompt('How many categories should each round have? Enter 3, 4, 5, or 6.', '6');
+    if (requestedCount === null) return;
+    const categoryCount = Number(requestedCount.trim());
+    if (![3, 4, 5, 6].includes(categoryCount)) {
+      window.alert('Please enter 3, 4, 5, or 6 categories.');
+      return;
+    }
+    emit('game:new', { categoryCount });
   }
 }
 
@@ -755,7 +781,9 @@ function judgeClueHtml(active) {
     ${daily ? `<div class="actions judge-primary-actions">
       <button class="good" onclick="judgeMark(true)" ${dailyWaiting ? 'disabled' : ''}>Correct</button>
       <button class="danger" onclick="judgeMark(false)" ${dailyWaiting ? 'disabled' : ''}>Incorrect</button>
-    </div>` : ''}
+    </div>
+    ${state.answerTimerEndsAt ? '<div id="answerTimer" class="phone-timer"></div>' : ''}
+    <button class="secondary" onclick="emit('answer:startTimer')" ${dailyWaiting ? 'disabled' : ''}>Give Them 5 Seconds</button>` : ''}
   </div>`;
 }
 
@@ -801,15 +829,16 @@ function judgeFinalHtml() {
   if (!state.session.status.startsWith('final') && state.session.status !== 'complete') return '';
   const eligible = state.players.filter((p) => !p.is_host && p.score > 0);
   const responses = new Map(state.final.responses.map((r) => [r.player_id, r]));
+  const allWagered = eligible.length > 0 && eligible.every((p) => responses.get(p.player_id)?.wager_submitted_at);
   const allJudged = eligible.length && eligible.every((p) => responses.get(p.player_id)?.is_correct !== null && responses.get(p.player_id)?.is_correct !== undefined);
   return `<div class="panel stack">
     <h2>Final GREGPARDY</h2>
     <p><strong>Category:</strong> ${escapeHtml(state.final.category?.category_name || '')}</p>
     <p class="answer"><strong>Correct:</strong> ${escapeHtml(state.final.clue?.correct_response || '')}</p>
     <div class="actions">
-      <button onclick="emit('final:revealClue')" ${state.session.status !== 'final_wager' ? 'disabled' : ''}>Reveal Final Clue</button>
+      <button onclick="emit('final:revealClue')" ${state.session.status !== 'final_wager' || !allWagered ? 'disabled' : ''}>Reveal Final Clue</button>
       ${state.session.status === 'final_clue' ? `<button onclick="emit('final:startTimer')">Start 30s Timer</button>` : ''}
-      ${state.session.status === 'final_answering' ? `<button class="blue" onclick="emit('final:addTime')">Add 10 More Seconds</button>` : ''}
+      ${state.session.status === 'final_answering' ? `<button class="blue" onclick="emit('final:addTime')">Add 5 Seconds</button>` : ''}
       ${state.session.status === 'final_results' ? `<button onclick="emit('final:nextReveal')">${finalRevealButtonLabel()}</button>` : ''}
       <button class="good" onclick="emit('game:end')" ${!allJudged && state.session.status !== 'final_results' ? 'disabled' : ''}>End Game</button>
     </div>

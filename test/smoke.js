@@ -131,15 +131,45 @@ async function main() {
 
     const previousRoom = judgeStarted.session.room_code;
     const newLobbyPromise = stateMatching(judge, (state) => state.session.status === 'lobby');
-    judge.emit('game:new');
+    judge.emit('game:new', { categoryCount: 4 });
     const newLobby = await newLobbyPromise;
     assert.equal(newLobby.session.status, 'lobby');
     assert.equal(newLobby.session.room_code, previousRoom);
+    assert.equal(newLobby.session.category_count, 4);
     assert.ok(newLobby.roomLeaderboard.length >= 2);
 
     playerOne.emit('player:rejoin', { profileToken: joinedOne.profileToken });
     const rejoined = await once(playerOne, 'player:rejoined');
     assert.notEqual(rejoined.playerId, joinedOne.playerId);
+
+    const rejoinedTwo = await join(playerTwo, newLobby.session.room_code, 'Smoke Two', joinedTwo.profileToken);
+    const shortGamePromise = stateMatching(judge, (state) => state.session.status === 'J_categories');
+    judge.emit('game:start', { allowRepeats: true });
+    const shortGame = await shortGamePromise;
+    assert.equal(shortGame.categories.length, 4);
+    assert.equal(shortGame.clues.length, 20);
+
+    const shortRoundPromise = stateMatching(judge, (state) => state.session.status === 'J');
+    judge.emit('round:introNext');
+    const shortRound = await shortRoundPromise;
+    const dailyDouble = shortRound.clues.find((clueRow) => clueRow.is_daily_double);
+    const dailySelectedPromise = stateMatching(
+      judge,
+      (state) => state.activeClue?.session_clue_id === dailyDouble.session_clue_id
+    );
+    judge.emit('clue:select', { sessionClueId: dailyDouble.session_clue_id });
+    await dailySelectedPromise;
+    const dailyShownPromise = stateMatching(judge, (state) => state.activeClue?.status === 'revealed');
+    judge.emit('clue:showDailyDouble', { wager: 400 });
+    await dailyShownPromise;
+    const dailyTimerPromise = stateMatching(judge, (state) => state.answerTimerEndsAt > Date.now());
+    judge.emit('answer:startTimer');
+    await dailyTimerPromise;
+    const dailyClosedPromise = stateMatching(judge, (state) => !state.activeClue);
+    judge.emit('clue:close');
+    await dailyClosedPromise;
+
+    assert.ok(rejoinedTwo.playerId);
 
     const chosenRoomPromise = stateMatching(
       judge,

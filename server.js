@@ -10,6 +10,7 @@ const PORT = Number(process.env.PORT || 3000);
 const BUZZ_WINDOW_MS = 300;
 const BUZZ_OPEN_MS = 10000;
 const FINAL_ANSWER_MS = 30000;
+const FINAL_SUBMISSION_GRACE_MS = 500;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'jeopardy.db');
 const PUBLIC_URL = String(process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
 const GAME_PASSWORD = process.env.GAME_PASSWORD || '';
@@ -172,6 +173,7 @@ function migrate() {
       current_round TEXT,
       active_player_id INTEGER,
       allow_repeated_categories INTEGER NOT NULL DEFAULT 0,
+      category_count INTEGER NOT NULL DEFAULT 6,
       created_at TEXT NOT NULL,
       started_at TEXT,
       completed_at TEXT
@@ -254,6 +256,18 @@ function migrate() {
   const finalColumns = db.prepare("PRAGMA table_info(final_response)").all().map((column) => column.name);
   if (!finalColumns.includes('draft_text')) {
     db.exec('ALTER TABLE final_response ADD COLUMN draft_text TEXT');
+  }
+  if (!finalColumns.includes('wager_submitted_at')) {
+    db.exec('ALTER TABLE final_response ADD COLUMN wager_submitted_at TEXT');
+    db.exec(`
+      UPDATE final_response
+      SET wager_submitted_at = submitted_at,
+          submitted_at = CASE WHEN response_text IS NULL THEN NULL ELSE submitted_at END
+    `);
+  }
+  const sessionColumns = db.prepare("PRAGMA table_info(game_session)").all().map((column) => column.name);
+  if (!sessionColumns.includes('category_count')) {
+    db.exec('ALTER TABLE game_session ADD COLUMN category_count INTEGER NOT NULL DEFAULT 6');
   }
   const playerColumns = db.prepare("PRAGMA table_info(player)").all().map((column) => column.name);
   if (!playerColumns.includes('profile_id')) {
@@ -611,17 +625,17 @@ function selectCompleteCategories(round, count, allowRepeats) {
   `).all(round, allowRepeats ? 1 : 0, round === 'FJ' ? 1 : 5, count);
 }
 
-function dailyDoubleKeys(round) {
+function dailyDoubleKeys(round, categoryCount) {
   const count = round === 'J' ? 1 : 2;
-  const columns = shuffle([1, 2, 3, 4, 5, 6]).slice(0, count);
+  const columns = shuffle(Array.from({ length: categoryCount }, (_value, index) => index + 1)).slice(0, count);
   return new Set(columns.map((col) => `${col}:${shuffle([2, 3, 4])[0]}`));
 }
 
-function createBoard(sessionId, allowRepeats) {
-  const j = selectCompleteCategories('J', 6, allowRepeats);
-  const dj = selectCompleteCategories('DJ', 6, allowRepeats);
+function createBoard(sessionId, allowRepeats, categoryCount = 6) {
+  const j = selectCompleteCategories('J', categoryCount, allowRepeats);
+  const dj = selectCompleteCategories('DJ', categoryCount, allowRepeats);
   const fj = selectCompleteCategories('FJ', 1, allowRepeats);
-  if (j.length < 6 || dj.length < 6 || fj.length < 1) {
+  if (j.length < categoryCount || dj.length < categoryCount || fj.length < 1) {
     throw new Error('Not enough unused complete categories remain.');
   }
 
@@ -651,8 +665,8 @@ function createBoard(sessionId, allowRepeats) {
     `);
     const markUsed = db.prepare('INSERT OR IGNORE INTO used_category (category_id, used_at) VALUES (?, ?)');
     const clueRows = db.prepare('SELECT * FROM clue WHERE category_id = ? ORDER BY row_in_category');
-    const jDds = dailyDoubleKeys('J');
-    const djDds = dailyDoubleKeys('DJ');
+    const jDds = dailyDoubleKeys('J', categoryCount);
+    const djDds = dailyDoubleKeys('DJ', categoryCount);
 
     for (const cat of categoryRows) {
       const info = insertCat.run(sessionId, cat.round, cat.board_col, cat.category_id);
@@ -727,7 +741,7 @@ function openBuzzing(activeClue) {
 
 function scheduleFinalAnswerLock(sessionId) {
   if (runtime.finalTimer) clearTimeout(runtime.finalTimer);
-  const remainingMs = Math.max(0, runtime.finalAnswerEndsAt - Date.now());
+  const remainingMs = Math.max(0, runtime.finalAnswerEndsAt - Date.now()) + FINAL_SUBMISSION_GRACE_MS;
   runtime.finalTimer = setTimeout(() => lockFinalAnswers(sessionId), remainingMs);
 }
 
@@ -958,11 +972,15 @@ io.on('connection', (socket) => {
     emitState();
   });
 
-  socket.on('game:new', () => {
+  socket.on('game:new', ({ categoryCount = 6 } = {}) => {
+    const cleanCategoryCount = Number(categoryCount);
+    if (![3, 4, 5, 6].includes(cleanCategoryCount)) {
+      return socket.emit('error:message', 'Games must have between 3 and 6 categories per round.');
+    }
     const previous = currentSession();
     if (previous.status !== 'complete') completeSession(previous);
-    const info = db.prepare("INSERT INTO game_session (room_code, status, created_at) VALUES (?, 'lobby', ?)")
-      .run(previous.room_code, now());
+    const info = db.prepare("INSERT INTO game_session (room_code, status, category_count, created_at) VALUES (?, 'lobby', ?, ?)")
+      .run(previous.room_code, cleanCategoryCount, now());
     const priorHost = judgeLease.profileId
       ? db.prepare('SELECT 1 FROM player WHERE session_id = ? AND profile_id = ? AND is_host = 1')
         .get(previous.session_id, judgeLease.profileId)
@@ -1047,7 +1065,7 @@ io.on('connection', (socket) => {
     const session = currentSession();
     if (getContestants(session.session_id).length < 2) return socket.emit('error:message', 'GREGPARDY! needs at least 2 players.');
     try {
-      createBoard(session.session_id, !!allowRepeats);
+      createBoard(session.session_id, !!allowRepeats, session.category_count || 6);
       const first = shuffle(getContestants(session.session_id))[0];
       db.prepare("UPDATE game_session SET status = 'J_categories', current_round = 'J', active_player_id = ?, allow_repeated_categories = ?, started_at = ? WHERE session_id = ?")
         .run(first.player_id, allowRepeats ? 1 : 0, now(), session.session_id);
@@ -1167,7 +1185,10 @@ io.on('connection', (socket) => {
 
   socket.on('answer:startTimer', () => {
     const state = publicState();
-    if (!state.activeClue || !runtime.buzz?.selectedPlayerId) return;
+    const hasAnsweringPlayer = state.activeClue?.is_daily_double
+      ? state.session.active_player_id
+      : runtime.buzz?.selectedPlayerId;
+    if (!state.activeClue || !hasAnsweringPlayer) return;
     if (runtime.answerTimer) clearTimeout(runtime.answerTimer);
     runtime.answerTimerEndsAt = Date.now() + 5000;
     runtime.answerTimer = setTimeout(() => {
@@ -1265,9 +1286,20 @@ io.on('connection', (socket) => {
     const player = socketPlayer(socket, session.session_id);
     if (!player || player.player_id !== Number(playerId)) return;
     if (!player || player.is_host || player.score <= 0) return;
-    const cleanWager = Math.max(0, Math.min(Number(wager), player.score));
-    db.prepare('INSERT OR REPLACE INTO final_response (session_id, player_id, wager, submitted_at) VALUES (?, ?, ?, ?)')
-      .run(session.session_id, player.player_id, cleanWager, now());
+    if (session.status !== 'final_wager') return;
+    const wagerText = String(wager ?? '').trim().replace(/^0+(?=\d)/, '');
+    const parsedWager = Number(wagerText || '0');
+    if (!/^\d+$/.test(wagerText || '0') || !Number.isFinite(parsedWager)) {
+      return socket.emit('error:message', 'Enter a valid whole-dollar wager.');
+    }
+    const cleanWager = Math.max(0, Math.min(parsedWager, player.score));
+    db.prepare(`
+      INSERT INTO final_response (session_id, player_id, wager, wager_submitted_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(session_id, player_id) DO UPDATE SET
+        wager = excluded.wager,
+        wager_submitted_at = excluded.wager_submitted_at
+    `).run(session.session_id, player.player_id, cleanWager, now());
     emitState();
   });
 
@@ -1282,6 +1314,12 @@ io.on('connection', (socket) => {
 
   socket.on('final:revealClue', () => {
     const session = currentSession();
+    const eligiblePlayers = finalEligiblePlayers(session.session_id);
+    const wagerCount = db.prepare('SELECT COUNT(*) AS count FROM final_response WHERE session_id = ? AND wager_submitted_at IS NOT NULL')
+      .get(session.session_id).count;
+    if (wagerCount < eligiblePlayers.length) {
+      return socket.emit('error:message', 'Wait for every eligible player to submit a Final wager.');
+    }
     if (runtime.finalTimer) clearTimeout(runtime.finalTimer);
     runtime.finalAnswerEndsAt = null;
     runtime.finalRevealStep = 0;
@@ -1302,7 +1340,7 @@ io.on('connection', (socket) => {
   socket.on('final:addTime', () => {
     const session = currentSession();
     if (session.status !== 'final_answering' || !runtime.finalAnswerEndsAt) return;
-    runtime.finalAnswerEndsAt = Math.max(Date.now(), runtime.finalAnswerEndsAt) + 10000;
+    runtime.finalAnswerEndsAt = Math.max(Date.now(), runtime.finalAnswerEndsAt) + 5000;
     scheduleFinalAnswerLock(session.session_id);
     emitState();
   });
@@ -1313,7 +1351,6 @@ io.on('connection', (socket) => {
     if (!player || player.is_host || player.player_id !== Number(playerId)) return;
     if (session.status !== 'final_answering') return socket.emit('error:message', 'Final answers are locked.');
     if (runtime.finalAnswerEndsAt && Date.now() > runtime.finalAnswerEndsAt) {
-      lockFinalAnswers(session.session_id);
       return socket.emit('error:message', 'Final answers are locked.');
     }
     db.prepare('UPDATE final_response SET response_text = ?, submitted_at = COALESCE(submitted_at, ?) WHERE session_id = ? AND player_id = ?')
