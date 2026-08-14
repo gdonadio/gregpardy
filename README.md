@@ -62,8 +62,9 @@ used-category history across code deployments. Keep the service at one instance.
 ## Game and room behavior
 
 - **New Game** completes the current game, retains the room code, and opens a new
-  lobby. The host chooses 3-6 categories per round (default 6). Existing player
-  browsers automatically rejoin with their persistent profile.
+  lobby. When the host starts the game, they choose a regular six-category game
+  or a shorter game with 3-5 categories per round. Existing player browsers
+  automatically rejoin with their persistent profile.
 - **New Room** generates a new room code and clears the current group.
 - The lobby shows the room QR code, waiting players, total wins, and cumulative
   winning scores.

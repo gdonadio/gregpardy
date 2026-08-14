@@ -707,9 +707,9 @@ function judgeAdminOptionsHtml() {
     <div class="actions">
       <button onclick="confirmNewRoom()" class="secondary">New Room</button>
       ${state.session.status === 'lobby'
-        ? '<button onclick="emit(\'game:start\')">Start Game</button>'
+        ? '<button onclick="confirmStartGame()">Start Game</button>'
         : '<button onclick="confirmNewGame()">New Game</button>'}
-      ${state.allowRepeatOffer ? `<button class="danger" onclick="emit('game:start',{allowRepeats:true})">Allow Repeats For This Game</button>` : ''}
+      ${state.allowRepeatOffer ? `<button class="danger" onclick="emit('game:start',{allowRepeats:true,categoryCount:${state.session.category_count || 6}})">Allow Repeats For This Game</button>` : ''}
       <button onclick="confirmAdvanceRound()" class="blue">Advance Round</button>
       <button onclick="emit('game:end')" class="danger">End Game</button>
     </div>
@@ -736,15 +736,52 @@ function confirmNewRoom() {
 function confirmNewGame() {
   const unfinished = state.session.status !== 'complete';
   if (!unfinished || window.confirm('Start a new game in this room? The current game will be recorded as complete.')) {
-    const requestedCount = window.prompt('How many categories should each round have? Enter 3, 4, 5, or 6.', '6');
-    if (requestedCount === null) return;
-    const categoryCount = Number(requestedCount.trim());
-    if (![3, 4, 5, 6].includes(categoryCount)) {
-      window.alert('Please enter 3, 4, 5, or 6 categories.');
-      return;
-    }
-    emit('game:new', { categoryCount });
+    emit('game:new');
   }
+}
+
+function confirmStartGame() {
+  const contestantCount = state.players.filter((player) => !player.is_host).length;
+  if (contestantCount < 2) {
+    window.alert('Waiting for at least 2 players.');
+    return;
+  }
+  if (!window.confirm('Are you sure you want to start the game?')) return;
+  showGameLengthDialog();
+}
+
+function showGameLengthDialog() {
+  document.body.insertAdjacentHTML('beforeend', `<div class="game-length-overlay" id="gameLengthDialog" role="dialog" aria-modal="true" aria-labelledby="gameLengthTitle">
+    <div class="panel stack game-length-dialog">
+      <h2 id="gameLengthTitle">Choose Game Length</h2>
+      <button class="good" onclick="startGameWithCategories(6)">Regular Game</button>
+      <button class="secondary" onclick="showShortGameChoices()">Shorter Game</button>
+      <button class="secondary" onclick="closeGameLengthDialog()">Cancel</button>
+    </div>
+  </div>`);
+}
+
+function showShortGameChoices() {
+  const dialog = $('#gameLengthDialog .game-length-dialog');
+  if (!dialog) return;
+  dialog.innerHTML = `<h2>How many categories per round?</h2>
+    <p class="muted">Each category contains five clues.</p>
+    <div class="game-length-options">
+      <button onclick="startGameWithCategories(3)">3</button>
+      <button onclick="startGameWithCategories(4)">4</button>
+      <button onclick="startGameWithCategories(5)">5</button>
+      <button class="good" onclick="startGameWithCategories(6)">6 (Full Length)</button>
+    </div>
+    <button class="secondary" onclick="closeGameLengthDialog()">Cancel</button>`;
+}
+
+function closeGameLengthDialog() {
+  $('#gameLengthDialog')?.remove();
+}
+
+function startGameWithCategories(categoryCount) {
+  closeGameLengthDialog();
+  emit('game:start', { categoryCount });
 }
 
 function confirmAdvanceRound() {

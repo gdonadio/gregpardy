@@ -619,6 +619,32 @@ textarea { min-height: 8rem; resize: vertical; }
   touch-action: manipulation;
 }
 
+.game-length-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.78);
+}
+
+.game-length-dialog {
+  width: min(520px, 100%);
+  text-align: center;
+}
+
+.game-length-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.game-length-options button {
+  min-height: 64px;
+  font-size: 1.1rem;
+}
+
 .stack { display: grid; gap: 12px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .muted { color: var(--muted); }

@@ -1061,14 +1061,20 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('game:start', ({ allowRepeats = false } = {}) => {
+  socket.on('game:start', ({ allowRepeats = false, categoryCount = 6 } = {}) => {
     const session = currentSession();
     if (getContestants(session.session_id).length < 2) return socket.emit('error:message', 'GREGPARDY! needs at least 2 players.');
+    const cleanCategoryCount = Number(categoryCount);
+    if (![3, 4, 5, 6].includes(cleanCategoryCount)) {
+      return socket.emit('error:message', 'Games must have between 3 and 6 categories per round.');
+    }
+    db.prepare('UPDATE game_session SET category_count = ? WHERE session_id = ?')
+      .run(cleanCategoryCount, session.session_id);
     try {
-      createBoard(session.session_id, !!allowRepeats, session.category_count || 6);
+      createBoard(session.session_id, !!allowRepeats, cleanCategoryCount);
       const first = shuffle(getContestants(session.session_id))[0];
-      db.prepare("UPDATE game_session SET status = 'J_categories', current_round = 'J', active_player_id = ?, allow_repeated_categories = ?, started_at = ? WHERE session_id = ?")
-        .run(first.player_id, allowRepeats ? 1 : 0, now(), session.session_id);
+      db.prepare("UPDATE game_session SET status = 'J_categories', current_round = 'J', active_player_id = ?, allow_repeated_categories = ?, category_count = ?, started_at = ? WHERE session_id = ?")
+        .run(first.player_id, allowRepeats ? 1 : 0, cleanCategoryCount, now(), session.session_id);
       runtime.lastError = '';
       runtime.allowRepeatOffer = false;
       emitState();

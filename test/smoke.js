@@ -144,7 +144,7 @@ async function main() {
 
     const rejoinedTwo = await join(playerTwo, newLobby.session.room_code, 'Smoke Two', joinedTwo.profileToken);
     const shortGamePromise = stateMatching(judge, (state) => state.session.status === 'J_categories');
-    judge.emit('game:start', { allowRepeats: true });
+    judge.emit('game:start', { allowRepeats: true, categoryCount: 4 });
     const shortGame = await shortGamePromise;
     assert.equal(shortGame.categories.length, 4);
     assert.equal(shortGame.clues.length, 20);
