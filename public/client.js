@@ -362,6 +362,7 @@ function activeClueScreenHtml(active) {
     ${state.buzz?.open && state.buzz.closesAt ? '<div class="buzz-countdown" aria-label="Buzzing time remaining"><div id="buzzTimerBar" class="buzz-countdown-bar"></div></div>' : ''}
     ${state.buzz?.selectedPlayerId ? `<div class="selected-buzzer">${escapeHtml(playerName(state.buzz.selectedPlayerId))}${timesUpHtml()}</div>` : ''}
     ${state.answerTimerEndsAt ? '<div id="answerTimer" class="timer"></div>' : ''}
+    ${active.is_daily_double ? timesUpHtml() : ''}
   </div></div>`;
 }
 
@@ -378,6 +379,7 @@ function finalScreenHtml() {
     <div class="badge">FINAL GREGPARDY</div>
     <div class="clue-text">${showingClue ? escapeHtml(state.final.clue?.clue_text || '') : escapeHtml(state.final.category?.category_name || 'Final category')}</div>
     ${showingCategory ? stageScoresHtml() : ''}
+    ${showingCategory ? '<h2 class="final-wager-prompt">Place your wagers now!</h2>' : ''}
     ${state.session.status === 'final_clue' ? '<h2>Get ready. Timer has not started.</h2>' : ''}
     ${state.session.status === 'final_answering' ? '<div id="finalTimer" class="timer"></div>' : ''}
     ${state.session.status === 'final_judging' ? '<h2>Answers locked. Judge is scoring.</h2>' : ''}
@@ -867,17 +869,18 @@ function judgeFinalHtml() {
   const eligible = state.players.filter((p) => !p.is_host && p.score > 0);
   const responses = new Map(state.final.responses.map((r) => [r.player_id, r]));
   const allWagered = eligible.length > 0 && eligible.every((p) => responses.get(p.player_id)?.wager_submitted_at);
-  const allJudged = eligible.length && eligible.every((p) => responses.get(p.player_id)?.is_correct !== null && responses.get(p.player_id)?.is_correct !== undefined);
+  const waitingToWager = eligible.filter((p) => !responses.get(p.player_id)?.wager_submitted_at);
   return `<div class="panel stack">
     <h2>Final GREGPARDY</h2>
     <p><strong>Category:</strong> ${escapeHtml(state.final.category?.category_name || '')}</p>
-    <p class="answer"><strong>Correct:</strong> ${escapeHtml(state.final.clue?.correct_response || '')}</p>
+    ${state.session.status === 'final_wager'
+      ? `<p class="muted"><strong>Waiting for:</strong> ${waitingToWager.length ? waitingToWager.map((player) => escapeHtml(player.display_name)).join(', ') : 'Everyone has wagered.'}</p>`
+      : `<p class="answer"><strong>Correct:</strong> ${escapeHtml(state.final.clue?.correct_response || '')}</p>`}
     <div class="actions">
       <button onclick="emit('final:revealClue')" ${state.session.status !== 'final_wager' || !allWagered ? 'disabled' : ''}>Reveal Final Clue</button>
       ${state.session.status === 'final_clue' ? `<button onclick="emit('final:startTimer')">Start 30s Timer</button>` : ''}
       ${state.session.status === 'final_answering' ? `<button class="blue" onclick="emit('final:addTime')">Add 5 Seconds</button>` : ''}
       ${state.session.status === 'final_results' ? `<button onclick="emit('final:nextReveal')">${finalRevealButtonLabel()}</button>` : ''}
-      <button class="good" onclick="emit('game:end')" ${!allJudged && state.session.status !== 'final_results' ? 'disabled' : ''}>End Game</button>
     </div>
     ${state.session.status === 'final_answering' ? '<p id="finalTimer" class="phone-timer"></p>' : ''}
     ${eligible.map((p) => {
